@@ -1405,6 +1405,14 @@ func collectAssetRoots(filesystem fs.FS) []assetRoot {
 		})
 	}
 
+	if distFS, err := fs.Sub(filesystem, path.Join("app", "dist")); err == nil {
+		roots = append(roots, assetRoot{
+			prefix:     path.Join("app", "dist"),
+			fs:         distFS,
+			fileServer: http.FileServer(http.FS(distFS)),
+		})
+	}
+
 	if distFS, err := fs.Sub(filesystem, "dist"); err == nil {
 		roots = append(roots, assetRoot{
 			prefix:     "dist",
@@ -1508,7 +1516,7 @@ func resolvePrebuiltFiles(filesystem fs.FS, p Page) (PrebuiltFiles, error) {
 
 	dist := p.DistDir
 	if dist == "" {
-		dist = "dist/alloy"
+		dist = defaultDistForComponent(p.Component)
 	}
 
 	base := p.Name
@@ -1530,6 +1538,24 @@ func resolvePrebuiltFiles(filesystem fs.FS, p Page) (PrebuiltFiles, error) {
 		Client: filepath.Join(dist, fmt.Sprintf("%s-client.js", base)),
 		CSS:    filepath.Join(dist, fmt.Sprintf("%s.css", base)),
 	}, nil
+}
+
+func defaultDistForComponent(component string) string {
+	if component == "" {
+		return "dist/alloy"
+	}
+
+	dir := filepath.Dir(component)
+	if dir == "" || dir == "." {
+		return "dist/alloy"
+	}
+
+	parent := filepath.Dir(dir)
+	if parent == "" || parent == "." {
+		return "dist/alloy"
+	}
+
+	return filepath.Join(parent, "dist/alloy")
 }
 
 func lookupManifest(filesystem fs.FS, dist string, base string) (PrebuiltFiles, bool, error) {

@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"alloy"
+	"github.com/3-lines-studio/alloy"
 )
 
 type pageSpec struct {
@@ -26,6 +26,9 @@ func main() {
 	flag.Parse()
 
 	pagesDir = defaultPagesDir(pagesDir)
+	if pagesDir == "" {
+		log.Fatal("pages dir required")
+	}
 	distDir = defaultDistDir(distDir, pagesDir)
 	if distDir == "" {
 		log.Fatal("out dir required")
@@ -146,12 +149,17 @@ func defaultPagesDir(flagValue string) string {
 		return flagValue
 	}
 
-	const localPages = "pages"
-	if dirExists(localPages) {
-		return localPages
+	candidates := []string{
+		filepath.Join("app", "pages"),
+		"pages",
+	}
+	for _, candidate := range candidates {
+		if dirExists(candidate) {
+			return candidate
+		}
 	}
 
-	return "pages"
+	return ""
 }
 
 func defaultDistDir(flagValue, pagesDir string) string {
@@ -159,7 +167,12 @@ func defaultDistDir(flagValue, pagesDir string) string {
 		return flagValue
 	}
 
-	baseDir := filepath.Dir(pagesDir)
+	if pagesDir == "" {
+		return ""
+	}
+
+	cleanPages := filepath.Clean(pagesDir)
+	baseDir := filepath.Dir(cleanPages)
 	if baseDir == "." {
 		return "dist/alloy"
 	}

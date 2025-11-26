@@ -19,13 +19,12 @@ func TestRenderTSXFileWithHydration(t *testing.T) {
 	t.Cleanup(resetBundleCache)
 
 	sampleDir := filepath.Join("cmd", "sample")
-	componentPath := filepath.Join(sampleDir, "pages", "home.tsx")
+	componentPath := filepath.Join(sampleDir, "app", "pages", "home.tsx")
 	rootID := defaultRootID(componentPath)
 
 	page := Page{
-		Component: "pages/home.tsx",
+		Component: "app/pages/home.tsx",
 		Name:      "home",
-		DistDir:   "dist/alloy",
 	}
 	files, err := resolvePrebuiltFiles(os.DirFS(sampleDir), page)
 	if err != nil {
@@ -71,9 +70,8 @@ func TestRegisterPagesServesPrebuilt(t *testing.T) {
 	pages := []Page{
 		{
 			Route:     "/",
-			Component: "pages/home.tsx",
+			Component: "app/pages/home.tsx",
 			Name:      "home",
-			DistDir:   "dist/alloy",
 			Props: func(r *http.Request) map[string]any {
 				return map[string]any{"title": "Alloy sample", "items": []string{"First", "Second"}}
 			},
@@ -296,7 +294,7 @@ func TestWithPublicAssetsServesDistFiles(t *testing.T) {
 	sampleDir := filepath.Join("cmd", "sample")
 	filesystem := os.DirFS(sampleDir)
 
-	data, err := fs.ReadFile(filesystem, path.Join("dist", "alloy", "manifest.json"))
+	data, err := fs.ReadFile(filesystem, path.Join("app", "dist", "alloy", "manifest.json"))
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
@@ -310,7 +308,7 @@ func TestWithPublicAssetsServesDistFiles(t *testing.T) {
 		t.Fatalf("manifest missing client entry")
 	}
 
-	asset := path.Join("dist/alloy", entry.Client)
+	asset := path.Join("app/dist/alloy", entry.Client)
 	request := httptest.NewRequest(http.MethodGet, "/"+asset, nil)
 
 	handler := WithPublicAssets(http.NotFound, filesystem)
@@ -609,7 +607,7 @@ func TestIsHashedAsset(t *testing.T) {
 }
 
 func TestDefaultRootAndJoinPaths(t *testing.T) {
-	if got := defaultRootID("pages/home.tsx"); got != "home-root" {
+	if got := defaultRootID("app/pages/home.tsx"); got != "home-root" {
 		t.Fatalf("default root: want home-root, got %s", got)
 	}
 	if got := defaultRootID(""); got != "root" {
@@ -794,9 +792,8 @@ func BenchmarkPagesHandlerPrebuilt(b *testing.B) {
 	pages := []Page{
 		{
 			Route:     "/",
-			Component: "pages/home.tsx",
+			Component: "app/pages/home.tsx",
 			Name:      "home",
-			DistDir:   "dist/alloy",
 			Props: func(r *http.Request) map[string]any {
 				return map[string]any{"title": "Alloy sample", "items": []string{"First", "Second"}}
 			},

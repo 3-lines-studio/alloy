@@ -1,4 +1,4 @@
-module alloy
+module github.com/3-lines-studio/alloy
 
 go 1.25
 

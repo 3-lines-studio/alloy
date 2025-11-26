@@ -6,7 +6,7 @@ export default function About() {
 				This page is server-rendered, hydrated on the client, and styled via the shared Tailwind
 				entry at <code>app.css</code>.
 			</p>
-			<p className="text-gray-600">Add more pages under <code>cmd/sample/pages</code> and run alloy build.</p>
+			<p className="text-gray-600">Add more pages under <code>cmd/sample/app/pages</code> and run alloy build.</p>
 		</div>
 	);
 }
