@@ -1,0 +1,29 @@
+.gocache/
+.air/
+.alloy-cache/
+
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+cmd/alloy/alloy
+cmd/sample/sample
+cover.*
+coverage/
+
+# Node artifacts
+node_modules/
+dist/
+.pnpm-store/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/

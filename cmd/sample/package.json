@@ -1,0 +1,14 @@
+{
+  "name": "alloy-react",
+  "private": true,
+  "dependencies": {
+    "react": "^18",
+    "react-dom": "^18"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.17",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "tailwindcss": "^4.1.17"
+  }
+}
