@@ -12,6 +12,7 @@
 *.out
 cmd/alloy/alloy
 cmd/sample/sample
+docs/docs
 cover.*
 coverage/
 

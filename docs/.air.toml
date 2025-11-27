@@ -1,0 +1,11 @@
+# minimal hot reload config
+root = "."
+tmp_dir = ".air"
+
+[build]
+cmd = "ALLOY_DEV=1 go build -o .air/server main.go"
+bin = ".air/server"
+full_bin = "ALLOY_DEV=1 .air/server"
+include_ext = ["go", "ts", "tsx", "css"]
+exclude_dir = ["node_modules", ".git", ".alloy-cache", ".gocache", ".air"]
+kill_delay = 300

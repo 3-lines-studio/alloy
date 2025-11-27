@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="1023.9999"
+   height="1023.9999"
+   viewBox="0 0 270.93333 270.93333"
+   version="1.1"
+   id="svg1"
+   inkscape:export-filename="alloy.svg"
+   inkscape:export-xdpi="96"
+   inkscape:export-ydpi="96"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:xlink="http://www.w3.org/1999/xlink"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview1"
+     pagecolor="#505050"
+     bordercolor="#ffffff"
+     borderopacity="1"
+     inkscape:showpageshadow="0"
+     inkscape:pageopacity="0"
+     inkscape:pagecheckerboard="1"
+     inkscape:deskcolor="#505050"
+     inkscape:document-units="mm"
+     inkscape:export-bgcolor="#ffffff00">
+    <inkscape:page
+       x="0"
+       y="0"
+       width="270.93332"
+       height="270.93332"
+       id="page2"
+       margin="0"
+       bleed="0" />
+  </sodipodi:namedview>
+  <defs
+     id="defs1">
+    <linearGradient
+       id="linearGradient1264"
+       inkscape:collect="always">
+      <stop
+         style="stop-color:#732646;stop-opacity:1;"
+         offset="0"
+         id="stop1264" />
+      <stop
+         style="stop-color:#275e74;stop-opacity:1;"
+         offset="1"
+         id="stop1265" />
+    </linearGradient>
+    <linearGradient
+       id="linearGradient1260"
+       inkscape:collect="always">
+      <stop
+         style="stop-color:#fd79af;stop-opacity:1;"
+         offset="0"
+         id="stop1261" />
+      <stop
+         style="stop-color:#79d4fd;stop-opacity:1;"
+         offset="1"
+         id="stop1262" />
+    </linearGradient>
+    <linearGradient
+       inkscape:collect="always"
+       xlink:href="#linearGradient1260"
+       id="linearGradient1263-2"
+       gradientUnits="userSpaceOnUse"
+       x1="101.86443"
+       y1="6.6071029"
+       x2="248.74046"
+       y2="153.48314" />
+    <inkscape:path-effect
+       effect="fillet_chamfer"
+       id="path-effect3-3-9"
+       is_visible="true"
+       lpeversion="1"
+       nodesatellites_param="F,0,1,1,0,9.5641547,0,1 @ F,0,1,1,0,9.5641547,0,1 @ F,0,1,1,0,9.5641547,0,1 @ F,0,0,1,0,9.5641547,0,1 @ F,0,1,1,0,9.5641547,0,1 @ F,0,1,1,0,9.5641547,0,1"
+       radius="0"
+       unit="px"
+       method="auto"
+       mode="F"
+       chamfer_steps="1"
+       flexible="false"
+       use_knot_distance="true"
+       apply_no_radius="true"
+       apply_with_radius="true"
+       only_selected="false"
+       hide_knots="false" />
+    <linearGradient
+       inkscape:collect="always"
+       xlink:href="#linearGradient1264"
+       id="linearGradient1265"
+       x1="97.667969"
+       y1="2.4106414"
+       x2="252.93692"
+       y2="157.6796"
+       gradientUnits="userSpaceOnUse" />
+  </defs>
+  <g
+     inkscape:label="Layer 1"
+     inkscape:groupmode="layer"
+     id="layer1">
+    <path
+       id="path2-2-0"
+       style="fill:url(#linearGradient1263-2);fill-opacity:1;fill-rule:nonzero;stroke:url(#linearGradient1265);stroke-width:24.6584;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;paint-order:markers stroke fill"
+       transform="matrix(1.0201166,0,0,1.0201166,-43.362268,53.811312)"
+       d="M 167.01965,195.18682 79.728205,144.78909 a 16.565602,16.565602 59.999999 0 1 -8.282801,-14.34623 l -3e-6,-100.795473 a 16.565602,16.565602 120 0 1 8.282801,-14.346233 l 87.291438,-50.397738 a 16.565602,16.565602 180 0 1 16.5656,-10e-7 l 87.29144,50.397734 a 16.565603,16.565603 59.999997 0 1 8.2828,14.346232 l 1e-5,100.795479 a 16.5656,16.5656 120 0 1 -8.2828,14.34623 l -87.29144,50.39773 a 16.565602,16.565602 180 0 1 -16.5656,0 z"
+       sodipodi:nodetypes="ccccccc"
+       inkscape:path-effect="#path-effect3-3-9"
+       inkscape:original-d="m 175.30245,199.9689 -103.857046,-59.96189 -3e-6,-119.923778 103.857039,-59.961894 103.85704,59.961888 1e-5,119.923784 z"
+       inkscape:transform-center-x="-19.975905"
+       inkscape:transform-center-y="48.090167"
+       inkscape:export-filename="alloy.png"
+       inkscape:export-xdpi="96"
+       inkscape:export-ydpi="96" />
+  </g>
+</svg>
