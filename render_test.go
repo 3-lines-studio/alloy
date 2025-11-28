@@ -78,7 +78,7 @@ func TestRegisterPagesServesPrebuilt(t *testing.T) {
 		},
 	}
 
-	handler, err := PagesHandler(filesystem, pages)
+	handler, err := Handler(filesystem, pages)
 	if err != nil {
 		t.Fatalf("pages handler: %v", err)
 	}
@@ -738,7 +738,7 @@ export default function Page({ title }: { title: string }) {
 	}
 	b.Run("execute_ssr", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			if _, err := executeSSR(context.Background(), componentPath, serverJS, props); err != nil {
+			if _, err := executeSSR(context.Background(), serverJS, props); err != nil {
 				b.Fatalf("execute ssr: %v", err)
 			}
 		}
@@ -785,7 +785,7 @@ export default function Page({ title }: { title: string }) {
 	})
 }
 
-func BenchmarkPagesHandlerPrebuilt(b *testing.B) {
+func BenchmarkHandlerPrebuilt(b *testing.B) {
 	resetBundleCache()
 	sampleDir := filepath.Join("cmd", "sample")
 	filesystem := os.DirFS(sampleDir)
@@ -801,7 +801,7 @@ func BenchmarkPagesHandlerPrebuilt(b *testing.B) {
 		},
 	}
 
-	handler, err := PagesHandler(filesystem, pages)
+	handler, err := Handler(filesystem, pages)
 	if err != nil {
 		b.Fatalf("pages handler: %v", err)
 	}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html"
 	"io/fs"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -15,7 +16,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,9 +27,8 @@ import (
 )
 
 const (
-	defaultRenderTimeout   = 2 * time.Second
-	liveReloadTickInterval = 5 * time.Second
-	quickjsStackSize       = 4 * 1024 * 1024
+	defaultRenderTimeout = 2 * time.Second
+	quickjsStackSize     = 4 * 1024 * 1024
 )
 
 // RenderResult contains SSR HTML and optional client bundle for hydration
@@ -100,8 +99,8 @@ type bundleCacheEntry struct {
 }
 
 type fileStamp struct {
-	modTime time.Time
-	size    int64
+	ModTime time.Time `json:"modTime"`
+	Size    int64     `json:"size"`
 }
 
 type manifestEntry struct {
@@ -148,13 +147,6 @@ type metaTag struct {
 	Rel      string
 	Href     string
 	Title    string
-}
-
-type tailwindWatcher struct {
-	outputPath string
-	cmd        *exec.Cmd
-	ready      chan struct{}
-	errCh      chan error
 }
 
 var (
@@ -296,42 +288,6 @@ func loadPolyfills(ctx *quickjs.Context) error {
 	return nil
 }
 
-// ServeLiveEvents streams keepalive messages for dev reload.
-func ServeLiveEvents(w http.ResponseWriter, r *http.Request) {
-	if !isDevMode() {
-		http.NotFound(w, r)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "stream unsupported", http.StatusInternalServerError)
-		return
-	}
-
-	ticker := time.NewTicker(liveReloadTickInterval)
-	defer ticker.Stop()
-
-	fmt.Fprintf(w, "data: ok\n\n")
-	flusher.Flush()
-
-	for {
-		select {
-		case <-liveReloadCh:
-			fmt.Fprintf(w, "data: reload\n\n")
-			flusher.Flush()
-		case <-r.Context().Done():
-			return
-		case t := <-ticker.C:
-			fmt.Fprintf(w, "data: %d\n\n", t.Unix())
-			flusher.Flush()
-		}
-	}
-}
-
 // ServePage renders a TSX component and writes an HTML document.
 func ServePage(w http.ResponseWriter, r *http.Request, componentPath string, props map[string]any, rootID string) {
 	result, err := RenderTSXFileWithHydrationWithContext(r.Context(), componentPath, props, rootID)
@@ -417,15 +373,6 @@ var bundleCache = struct {
 	entries: make(map[string]*bundleCacheEntry),
 }
 
-var liveReloadCh = make(chan struct{}, 1)
-
-func triggerLiveReload() {
-	select {
-	case liveReloadCh <- struct{}{}:
-	default:
-	}
-}
-
 // ToHTML returns complete HTML document with hydration script
 func (r *RenderResult) ToHTML(rootID string) string {
 	if r.ClientJS == "" && r.ClientPath == "" && len(r.ClientPaths) == 0 {
@@ -440,7 +387,6 @@ func (r *RenderResult) ToHTML(rootID string) string {
 	head := buildHead(metaTags)
 	cssTag := r.buildCSSTag()
 	scriptTag := r.buildScriptTag()
-	liveReload := buildLiveReloadScript()
 
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html>
@@ -451,8 +397,8 @@ func (r *RenderResult) ToHTML(rootID string) string {
 	<div id="%s">%s</div>
 	<script id="%s-props" type="application/json">%s</script>
 	%s
-</body>%s
-</html>`, head, cssTag, rootID, r.HTML, rootID, string(propsJSON), scriptTag, liveReload)
+</body>
+</html>`, head, cssTag, rootID, r.HTML, rootID, string(propsJSON), scriptTag)
 }
 
 func (r *RenderResult) buildCSSTag() string {
@@ -483,21 +429,6 @@ func (r *RenderResult) buildScriptTag() string {
 		return fmt.Sprintf(`<script type="module">%s</script>`, r.ClientJS)
 	}
 	return ""
-}
-
-func buildLiveReloadScript() string {
-	if !isDevMode() {
-		return ""
-	}
-	return `
-<script type="module">
-    const es = new EventSource("/__live");
-    es.onmessage = function (ev) {
-        if (ev.data === "reload") {
-            window.location.reload();
-        }
-    };
-</script>`
 }
 
 func buildHead(tags []metaTag) string {
@@ -693,10 +624,9 @@ func RenderTSXFileWithHydrationWithContext(ctx context.Context, filePath string,
 		return nil, fmt.Errorf("missing app.css at %s: %w", cssPath, err)
 	}
 
-	devMode := isDevMode()
 	serverJS, clientJS, css := readBundlesFromCache(absPath, rootID)
 	if serverJS == "" || clientJS == "" || css == "" {
-		if !devMode {
+		if !isDevMode() {
 			return nil, fmt.Errorf("component %s (rootID=%s) not registered; call RegisterPrebuiltBundle in production", absPath, rootID)
 		}
 
@@ -713,12 +643,9 @@ func RenderTSXFileWithHydrationWithContext(ctx context.Context, filePath string,
 		}
 
 		storeBundles(absPath, rootID, serverJS, clientJS, css, stamps)
-		if devMode {
-			triggerLiveReload()
-		}
 	}
 
-	html, err := executeSSR(ctx, absPath, serverJS, props)
+	html, err := executeSSR(ctx, serverJS, props)
 	if err != nil {
 		return nil, fmt.Errorf("ssr failed for %s: %w", absPath, err)
 	}
@@ -752,7 +679,7 @@ func RenderPrebuiltWithContext(ctx context.Context, filePath string, props map[s
 		return nil, fmt.Errorf("component %s (rootID=%s) not registered; call RegisterPrebuiltBundleFromFS before serving", absPath, rootID)
 	}
 
-	html, err := executeSSR(ctx, absPath, serverJS, props)
+	html, err := executeSSR(ctx, serverJS, props)
 	if err != nil {
 		return nil, fmt.Errorf("ssr failed for %s: %w", absPath, err)
 	}
@@ -1011,7 +938,6 @@ func RegisterPages(mux *http.ServeMux, filesystem fs.FS, pages []Page) error {
 		return nil
 	}
 
-	devMode := isDevMode()
 	routeEntries := make([]routeEntry, 0, len(pages))
 
 	for _, p := range pages {
@@ -1025,7 +951,7 @@ func RegisterPages(mux *http.ServeMux, filesystem fs.FS, pages []Page) error {
 		}
 
 		var prebuiltFiles PrebuiltFiles
-		if !devMode {
+		if !isDevMode() {
 			files, err := resolvePrebuiltFiles(filesystem, p)
 			if err != nil {
 				return err
@@ -1092,19 +1018,8 @@ func RegisterPages(mux *http.ServeMux, filesystem fs.FS, pages []Page) error {
 	return nil
 }
 
-// PagesHandler builds an http.HandlerFunc that serves the provided pages.
-func PagesHandler(filesystem fs.FS, pages []Page) (http.HandlerFunc, error) {
-	mux := http.NewServeMux()
-
-	if err := RegisterPages(mux, filesystem, pages); err != nil {
-		return nil, err
-	}
-
-	return mux.ServeHTTP, nil
-}
-
-// Handler builds an http.Handler with pages, live reload, and public assets.
-func Handler(filesystem fs.FS, pages []Page) (http.Handler, error) {
+// Handler builds an http.Handler with pages, and public assets.
+func Handler(filesystem fs.FS, pages []Page) (http.HandlerFunc, error) {
 	if filesystem == nil {
 		return nil, fmt.Errorf("filesystem required")
 	}
@@ -1114,8 +1029,6 @@ func Handler(filesystem fs.FS, pages []Page) (http.Handler, error) {
 	if err := RegisterPages(mux, filesystem, pages); err != nil {
 		return nil, err
 	}
-
-	mux.HandleFunc("/__live", ServeLiveEvents)
 
 	return WithPublicAssets(mux.ServeHTTP, filesystem), nil
 }
@@ -1319,8 +1232,8 @@ if (rootEl) {
 		Target:              api.ES2020,
 		EntryNames:          "client-[name]-[hash]",
 		ChunkNames:          "chunk-[hash]",
-		MinifyWhitespace:    true,
-		MinifySyntax:        true,
+		MinifyWhitespace:    !isDevMode(),
+		MinifySyntax:        !isDevMode(),
 		NodePaths:           []string{filepath.Join(cwd, "node_modules")},
 	})
 
@@ -1694,164 +1607,10 @@ func buildAll(componentPath string, rootID string) (string, string, string, []st
 	return serverJS, clientJS, css, deps, nil
 }
 
-func readDevCSSCache(cssPath string, componentPath string, cssModTime time.Time, componentModTime time.Time) (string, bool) {
-	if !isDevMode() {
-		return "", false
-	}
-
-	cachePath := devCSSCachePath(cssPath, componentPath, cssModTime, componentModTime)
-	data, err := os.ReadFile(cachePath)
-	if err != nil {
-		return "", false
-	}
-
-	return string(data), true
-}
-
-func writeDevCSSCache(cssPath string, componentPath string, cssModTime time.Time, componentModTime time.Time, css string) {
-	if !isDevMode() {
-		return
-	}
-
-	cachePath := devCSSCachePath(cssPath, componentPath, cssModTime, componentModTime)
-	_ = os.MkdirAll(filepath.Dir(cachePath), 0755)
-	_ = os.WriteFile(cachePath, []byte(css), 0644)
-}
-
-func devCSSCachePath(cssPath string, componentPath string, cssModTime time.Time, componentModTime time.Time) string {
-	dir := findPackageRoot(filepath.Dir(cssPath))
-	sum := filepath.Base(cssPath) +
-		strconv.FormatInt(cssModTime.UnixNano(), 10) +
-		componentPath +
-		strconv.FormatInt(componentModTime.UnixNano(), 10)
-	filename := fmt.Sprintf("%s-%x.css", filepath.Base(dir), sha1String(sum))
-	return filepath.Join(dir, ".alloy-cache", filename)
-}
-
 func sha1String(s string) []byte {
 	h := sha1.New()
 	_, _ = h.Write([]byte(s))
 	return h.Sum(nil)
-}
-
-var tailwindWatchers = struct {
-	sync.Mutex
-	w map[string]*tailwindWatcher
-}{
-	w: make(map[string]*tailwindWatcher),
-}
-
-func ensureTailwindWatcher(componentPath string, cssPath string) (string, error) {
-	contentPattern := filepath.Join(filepath.Dir(componentPath), "**", "*.{html,js,jsx,ts,tsx}")
-
-	tailwindWatchers.Lock()
-	existing := tailwindWatchers.w[cssPath]
-	if existing != nil {
-		tailwindWatchers.Unlock()
-		return waitForWatcher(existing)
-	}
-
-	outputPath := filepath.Join(findPackageRoot(filepath.Dir(cssPath)), ".alloy-cache", "tailwind-watch-"+filepath.Base(cssPath)+".css")
-	_ = os.MkdirAll(filepath.Dir(outputPath), 0755)
-
-	root := findPackageRoot(filepath.Dir(cssPath))
-	cmd, err := tailwindCmd(root,
-		"-i", cssPath,
-		"-o", outputPath,
-		"--content", contentPattern,
-		"--watch",
-	)
-	if err != nil {
-		tailwindWatchers.Unlock()
-		return "", err
-	}
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	watcher := &tailwindWatcher{
-		outputPath: outputPath,
-		cmd:        cmd,
-		ready:      make(chan struct{}),
-		errCh:      make(chan error, 1),
-	}
-
-	tailwindWatchers.w[cssPath] = watcher
-	tailwindWatchers.Unlock()
-
-	go func() {
-		if err := cmd.Start(); err != nil {
-			watcher.errCh <- err
-			close(watcher.ready)
-			clearWatcher(cssPath)
-			return
-		}
-
-		go func() {
-			err := cmd.Wait()
-			if err != nil {
-				select {
-				case watcher.errCh <- err:
-				default:
-				}
-			}
-			clearWatcher(cssPath)
-		}()
-
-		// Wait for initial output
-		for range 20 {
-			if info, err := os.Stat(outputPath); err == nil && info.Size() > 0 {
-				close(watcher.ready)
-				return
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		watcher.errCh <- fmt.Errorf("tailwind watch output not ready")
-		close(watcher.ready)
-		clearWatcher(cssPath)
-	}()
-
-	return waitForWatcher(watcher)
-}
-
-func waitForWatcher(watcher *tailwindWatcher) (string, error) {
-	select {
-	case <-watcher.ready:
-		select {
-		case err := <-watcher.errCh:
-			if err != nil {
-				return "", err
-			}
-		default:
-		}
-		info, err := os.Stat(watcher.outputPath)
-		if err == nil && info.Size() > 0 {
-			return watcher.outputPath, nil
-		}
-		return "", fmt.Errorf("tailwind watch output not ready")
-	case <-time.After(5 * time.Second):
-		return "", fmt.Errorf("tailwind watch not ready")
-	}
-}
-
-func clearWatcher(cssPath string) {
-	tailwindWatchers.Lock()
-	delete(tailwindWatchers.w, cssPath)
-	tailwindWatchers.Unlock()
-}
-
-func readWatchedCSS(outputPath string, minModTime time.Time) (string, error) {
-	for range 20 {
-		info, err := os.Stat(outputPath)
-		if err == nil && info.Size() > 0 && (info.ModTime().After(minModTime) || info.ModTime().Equal(minModTime)) {
-			data, readErr := os.ReadFile(outputPath)
-			if readErr != nil {
-				return "", readErr
-			}
-			return string(data), nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return "", fmt.Errorf("tailwind watch output not fresh")
 }
 
 // bundleTSXFile builds from a file path, supporting relative imports
@@ -1995,48 +1754,20 @@ func buildTailwindCSS(componentPath string) (string, []string, error) {
 		return "", nil, err
 	}
 
-	componentInfo, err := os.Stat(absPath)
-	if err != nil {
-		return "", nil, fmt.Errorf("component not found %s: %w", absPath, err)
-	}
-
 	dir := filepath.Dir(absPath)
 	cssPath := filepath.Join(dir, "app.css")
-	cssInfo, err := os.Stat(cssPath)
-	if err != nil {
+	if _, err := os.Stat(cssPath); err != nil {
 		return "", nil, fmt.Errorf("missing app.css at %s: %w", cssPath, err)
 	}
 
 	cssDeps := []string{cssPath}
 
-	if isDevMode() {
-		if css, ok := readDevCSSCache(cssPath, absPath, cssInfo.ModTime(), componentInfo.ModTime()); ok {
-			go func() {
-				_, _ = ensureTailwindWatcher(componentPath, cssPath)
-			}()
-			return css, cssDeps, nil
-		}
-
-		outputPath, err := ensureTailwindWatcher(componentPath, cssPath)
-		if err == nil {
-			latest := cssInfo.ModTime()
-			if componentInfo.ModTime().After(latest) {
-				latest = componentInfo.ModTime()
-			}
-			css, readErr := readWatchedCSS(outputPath, latest)
-			if readErr == nil {
-				writeDevCSSCache(cssPath, absPath, cssInfo.ModTime(), componentInfo.ModTime(), css)
-				return css, cssDeps, nil
-			}
-		}
-	}
-
+	fmt.Fprintf(os.Stderr, "[css] building with tailwindcss\n")
 	cssString, err := runTailwind(cssPath, dir)
 	if err != nil {
 		return "", nil, err
 	}
 
-	writeDevCSSCache(cssPath, absPath, cssInfo.ModTime(), componentInfo.ModTime(), cssString)
 	return cssString, cssDeps, nil
 }
 
@@ -2153,10 +1884,12 @@ func readBundlesFromCache(path string, rootID string) (string, string, string) {
 	bundleCache.RLock()
 	entry := bundleCache.entries[path]
 	bundleCache.RUnlock()
-	if entry == nil || entryStale(entry) {
-		return "", "", ""
+
+	if entry != nil && !entryStale(entry) {
+		return entry.serverJS, entry.clientByID[rootID], entry.css
 	}
-	return entry.serverJS, entry.clientByID[rootID], entry.css
+
+	return "", "", ""
 }
 
 func storeBundles(path string, rootID string, serverJS string, clientJS string, css string, deps map[string]fileStamp) {
@@ -2178,6 +1911,8 @@ func storeBundles(path string, rootID string, serverJS string, clientJS string, 
 	entry.clientByID[rootID] = clientJS
 	entry.deps = deps
 	entry.prebuilt = false
+	clientByID := make(map[string]string, len(entry.clientByID))
+	maps.Copy(clientByID, entry.clientByID)
 	bundleCache.Unlock()
 }
 
@@ -2192,7 +1927,7 @@ func entryStale(entry *bundleCacheEntry) bool {
 }
 
 // executeSSR runs the JS code in QuickJS using the runtime pool.
-func executeSSR(ctx context.Context, componentPath string, jsCode string, props map[string]any) (string, error) {
+func executeSSR(ctx context.Context, jsCode string, props map[string]any) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -2307,8 +2042,8 @@ func captureFileStamps(paths []string) (map[string]fileStamp, error) {
 			return nil, err
 		}
 		stamps[path] = fileStamp{
-			modTime: info.ModTime(),
-			size:    info.Size(),
+			ModTime: info.ModTime(),
+			Size:    info.Size(),
 		}
 	}
 
@@ -2321,7 +2056,7 @@ func cacheStale(stamps map[string]fileStamp) bool {
 	}
 	for path, stamp := range stamps {
 		info, err := os.Stat(path)
-		if err != nil || !info.ModTime().Equal(stamp.modTime) || info.Size() != stamp.size {
+		if err != nil || !info.ModTime().Equal(stamp.ModTime) || info.Size() != stamp.Size {
 			return true
 		}
 	}
