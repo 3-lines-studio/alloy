@@ -23,6 +23,13 @@ import (
 
 	"github.com/buke/quickjs-go"
 	"github.com/evanw/esbuild/pkg/api"
+	"golang.org/x/sync/errgroup"
+)
+
+const (
+	defaultRenderTimeout   = 2 * time.Second
+	liveReloadTickInterval = 5 * time.Second
+	quickjsStackSize       = 4 * 1024 * 1024
 )
 
 // RenderResult contains SSR HTML and optional client bundle for hydration
@@ -37,11 +44,13 @@ type RenderResult struct {
 	SharedCSS   string
 }
 
+// ClientAssets represents bundled client assets from BuildClientBundles
 type ClientAssets struct {
 	Entry  string
 	Chunks []string
 }
 
+// ClientEntry defines a client component entry point for bundling
 type ClientEntry struct {
 	Name      string
 	Component string
@@ -57,55 +66,19 @@ type PrebuiltFiles struct {
 	SharedCSS    string
 }
 
-type RenderOutcome string
-
-const (
-	RenderOutcomeSuccess RenderOutcome = "success"
-	RenderOutcomeError   RenderOutcome = "error"
-)
-
-type MetricsRecorder interface {
-	RecordRender(component string, duration time.Duration, outcome RenderOutcome, propsBytes int)
+// Page describes a routed component.
+type Page struct {
+	Route     string
+	Component string
+	RootID    string
+	Files     PrebuiltFiles
+	DistDir   string
+	Name      string
+	Props     func(r *http.Request) map[string]any
+	Ctx       func(r *http.Request) context.Context
 }
 
-type noopMetrics struct{}
-
-func (noopMetrics) RecordRender(string, time.Duration, RenderOutcome, int) {}
-
-var metricsRecorder atomic.Value
-var renderTimeout atomic.Value
-
-func init() {
-	metricsRecorder.Store(MetricsRecorder(noopMetrics{}))
-	renderTimeout.Store(2 * time.Second)
-	jsPool = newRuntimePool(defaultRuntimePoolSize())
-}
-
-// SetMetricsRecorder configures a process-wide recorder; pass nil to reset to no-op.
-func SetMetricsRecorder(recorder MetricsRecorder) {
-	if recorder == nil {
-		metricsRecorder.Store(MetricsRecorder(noopMetrics{}))
-		return
-	}
-	metricsRecorder.Store(recorder)
-}
-
-// SetRenderTimeout sets a per-render timeout; zero disables the timeout.
-func SetRenderTimeout(d time.Duration) {
-	if d < 0 {
-		d = 0
-	}
-	renderTimeout.Store(d)
-}
-
-// SetRuntimePoolSize adjusts the max pooled runtimes; minimum is 1.
-func SetRuntimePoolSize(size int) {
-	if size < 1 {
-		size = 1
-	}
-	jsPool.setSize(size)
-}
-
+// Internal runtime types
 type jsRuntime struct {
 	rt  *quickjs.Runtime
 	ctx *quickjs.Context
@@ -117,7 +90,82 @@ type runtimePool struct {
 	size int
 }
 
-var jsPool *runtimePool
+// Internal cache types
+type bundleCacheEntry struct {
+	serverJS   string
+	clientByID map[string]string
+	css        string
+	deps       map[string]fileStamp
+	prebuilt   bool
+}
+
+type fileStamp struct {
+	modTime time.Time
+	size    int64
+}
+
+type manifestEntry struct {
+	Server string   `json:"server"`
+	Client string   `json:"client,omitempty"`
+	CSS    string   `json:"css"`
+	Chunks []string `json:"chunks,omitempty"`
+	Shared string   `json:"sharedCss,omitempty"`
+}
+
+// Internal handler types
+type publicAssetsHandler struct {
+	next  http.Handler
+	roots []assetRoot
+}
+
+type assetRoot struct {
+	prefix     string
+	fs         fs.FS
+	fileServer http.Handler
+}
+
+// Internal routing types
+type routeEntry struct {
+	segments []routeSegment
+	page     Page
+	rootID   string
+	files    PrebuiltFiles
+}
+
+type routeSegment struct {
+	literal string
+	param   string
+}
+
+type routeParamsKey struct{}
+
+// Internal helper types
+type metaTag struct {
+	TagName  string
+	Name     string
+	Property string
+	Content  string
+	Rel      string
+	Href     string
+	Title    string
+}
+
+type tailwindWatcher struct {
+	outputPath string
+	cmd        *exec.Cmd
+	ready      chan struct{}
+	errCh      chan error
+}
+
+var (
+	renderTimeout atomic.Value
+	jsPool        *runtimePool
+)
+
+func init() {
+	renderTimeout.Store(defaultRenderTimeout)
+	jsPool = newRuntimePool(defaultRuntimePoolSize())
+}
 
 func newRuntimePool(size int) *runtimePool {
 	if size < 1 {
@@ -135,22 +183,6 @@ func defaultRuntimePoolSize() int {
 		return 1
 	}
 	return size
-}
-
-func (p *runtimePool) setSize(size int) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if size < 1 {
-		size = 1
-	}
-
-	if size == p.size {
-		return
-	}
-
-	p.sem = make(chan struct{}, size)
-	p.size = size
 }
 
 func (p *runtimePool) acquire(ctx context.Context) (*jsRuntime, error) {
@@ -189,17 +221,9 @@ func (p *runtimePool) release(vm *jsRuntime) {
 	}
 }
 
-func (p *runtimePool) discard(vm *jsRuntime) {
-	closeRuntime(vm)
-	select {
-	case <-p.sem:
-	default:
-	}
-}
-
 func newRuntimeWithContext() (*jsRuntime, error) {
 	rt := quickjs.NewRuntime()
-	rt.SetMaxStackSize(4 * 1024 * 1024)
+	rt.SetMaxStackSize(quickjsStackSize)
 
 	ctx := rt.NewContext()
 	if err := loadPolyfills(ctx); err != nil {
@@ -215,25 +239,19 @@ func newRuntimeWithContext() (*jsRuntime, error) {
 }
 
 func closeRuntime(vm *jsRuntime) {
-	if vm == nil || vm.rt == nil {
+	if vm == nil {
 		return
 	}
-
 	if vm.ctx != nil {
 		vm.ctx.Close()
 	}
-	vm.rt.Close()
+	if vm.rt != nil {
+		vm.rt.Close()
+	}
 }
 
 func currentRenderTimeout() time.Duration {
-	value := renderTimeout.Load()
-	if value == nil {
-		return 0
-	}
-	timeout, ok := value.(time.Duration)
-	if !ok {
-		return 0
-	}
+	timeout, _ := renderTimeout.Load().(time.Duration)
 	return timeout
 }
 
@@ -278,18 +296,6 @@ func loadPolyfills(ctx *quickjs.Context) error {
 	return nil
 }
 
-// Page describes a routed component.
-type Page struct {
-	Route     string
-	Component string
-	RootID    string
-	Files     PrebuiltFiles
-	DistDir   string
-	Name      string
-	Props     func(r *http.Request) map[string]any
-	Ctx       func(r *http.Request) context.Context
-}
-
 // ServeLiveEvents streams keepalive messages for dev reload.
 func ServeLiveEvents(w http.ResponseWriter, r *http.Request) {
 	if !isDevMode() {
@@ -306,7 +312,7 @@ func ServeLiveEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(liveReloadTickInterval)
 	defer ticker.Stop()
 
 	fmt.Fprintf(w, "data: ok\n\n")
@@ -404,16 +410,8 @@ func RegisterPrebuiltBundle(componentPath string, rootID string, serverJS string
 	return nil
 }
 
-type bundleCacheEntry struct {
-	serverJS   string
-	clientByID map[string]string
-	css        string
-	deps       map[string]fileStamp
-	prebuilt   bool
-}
-
 var bundleCache = struct {
-	sync.Mutex
+	sync.RWMutex
 	entries map[string]*bundleCacheEntry
 }{
 	entries: make(map[string]*bundleCacheEntry),
@@ -434,40 +432,15 @@ func (r *RenderResult) ToHTML(rootID string) string {
 		return r.HTML
 	}
 
-	propsJSON, _ := json.Marshal(r.Props)
-
+	propsJSON, err := json.Marshal(r.Props)
+	if err != nil {
+		propsJSON = []byte("{}")
+	}
 	metaTags := metaTagsFromProps(r.Props)
 	head := buildHead(metaTags)
-	cssTag := ""
-	if r.SharedCSS != "" {
-		cssTag += fmt.Sprintf("\n\t<link rel=\"stylesheet\" href=\"%s\" />", r.SharedCSS)
-	}
-	switch {
-	case r.CSSPath != "":
-		cssTag += fmt.Sprintf("\n\t<link rel=\"stylesheet\" href=\"%s\" />", r.CSSPath)
-	case r.CSS != "":
-		cssTag += fmt.Sprintf("\n\t<style>%s</style>", r.CSS)
-	}
-
-	liveReload := ""
-	if isDevMode() {
-		liveReload = `
-	<script>(function(){if(typeof EventSource==="undefined"){return;}var es=new EventSource("/__live");es.onmessage=function(ev){if(ev.data==="reload"){window.location.reload();}};es.onerror=function(){es.close();var check=function(){fetch(window.location.href,{cache:"no-store"}).then(function(){window.location.reload();}).catch(function(){setTimeout(check,400);});};setTimeout(check,400);};})();</script>`
-	}
-
-	scriptTag := ""
-	switch {
-	case len(r.ClientPaths) > 0:
-		var b strings.Builder
-		for _, p := range r.ClientPaths {
-			fmt.Fprintf(&b, "<script type=\"module\" src=\"%s\"></script>\n", p)
-		}
-		scriptTag = strings.TrimSuffix(b.String(), "\n")
-	case r.ClientPath != "":
-		scriptTag = fmt.Sprintf(`<script src="%s"></script>`, r.ClientPath)
-	case r.ClientJS != "":
-		scriptTag = fmt.Sprintf(`<script>%s</script>`, r.ClientJS)
-	}
+	cssTag := r.buildCSSTag()
+	scriptTag := r.buildScriptTag()
+	liveReload := buildLiveReloadScript()
 
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html>
@@ -482,14 +455,49 @@ func (r *RenderResult) ToHTML(rootID string) string {
 </html>`, head, cssTag, rootID, r.HTML, rootID, string(propsJSON), scriptTag, liveReload)
 }
 
-type metaTag struct {
-	TagName  string
-	Name     string
-	Property string
-	Content  string
-	Rel      string
-	Href     string
-	Title    string
+func (r *RenderResult) buildCSSTag() string {
+	cssTag := ""
+	if r.SharedCSS != "" {
+		cssTag += fmt.Sprintf("\n\t<link rel=\"stylesheet\" href=\"%s\" />", r.SharedCSS)
+	}
+	switch {
+	case r.CSSPath != "":
+		cssTag += fmt.Sprintf("\n\t<link rel=\"stylesheet\" href=\"%s\" />", r.CSSPath)
+	case r.CSS != "":
+		cssTag += fmt.Sprintf("\n\t<style>%s</style>", r.CSS)
+	}
+	return cssTag
+}
+
+func (r *RenderResult) buildScriptTag() string {
+	switch {
+	case len(r.ClientPaths) > 0:
+		var b strings.Builder
+		for _, p := range r.ClientPaths {
+			fmt.Fprintf(&b, "<script type=\"module\" src=\"%s\"></script>\n", p)
+		}
+		return strings.TrimSuffix(b.String(), "\n")
+	case r.ClientPath != "":
+		return fmt.Sprintf(`<script type="module" src="%s"></script>`, r.ClientPath)
+	case r.ClientJS != "":
+		return fmt.Sprintf(`<script type="module">%s</script>`, r.ClientJS)
+	}
+	return ""
+}
+
+func buildLiveReloadScript() string {
+	if !isDevMode() {
+		return ""
+	}
+	return `
+<script type="module">
+    const es = new EventSource("/__live");
+    es.onmessage = function (ev) {
+        if (ev.data === "reload") {
+            window.location.reload();
+        }
+    };
+</script>`
 }
 
 func buildHead(tags []metaTag) string {
@@ -525,7 +533,7 @@ func buildHead(tags []metaTag) string {
 	}
 
 	if !hasTitle {
-		b.WriteString("\n\t<title>Page</title>")
+		b.WriteString("\n\t<title>Alloy</title>")
 	}
 
 	return b.String()
@@ -542,23 +550,16 @@ func buildMetaTagHTML(tag metaTag) string {
 	}
 
 	var attrs []string
-
-	if tag.Name != "" {
-		attrs = append(attrs, fmt.Sprintf(`name="%s"`, html.EscapeString(tag.Name)))
+	addAttr := func(name, val string) {
+		if val != "" {
+			attrs = append(attrs, fmt.Sprintf(`%s="%s"`, name, html.EscapeString(val)))
+		}
 	}
-	if tag.Property != "" {
-		attrs = append(attrs, fmt.Sprintf(`property="%s"`, html.EscapeString(tag.Property)))
-	}
-	if tag.Content != "" {
-		attrs = append(attrs, fmt.Sprintf(`content="%s"`, html.EscapeString(tag.Content)))
-	}
-	if tag.Rel != "" {
-		attrs = append(attrs, fmt.Sprintf(`rel="%s"`, html.EscapeString(tag.Rel)))
-	}
-	if tag.Href != "" {
-		attrs = append(attrs, fmt.Sprintf(`href="%s"`, html.EscapeString(tag.Href)))
-	}
-
+	addAttr("name", tag.Name)
+	addAttr("property", tag.Property)
+	addAttr("content", tag.Content)
+	addAttr("rel", tag.Rel)
+	addAttr("href", tag.Href)
 	if len(attrs) == 0 {
 		return ""
 	}
@@ -569,24 +570,22 @@ func buildMetaTagHTML(tag metaTag) string {
 }
 
 func sortMetaAttributes(attrs []string) {
+	priority := func(attr string) int {
+		if strings.HasPrefix(attr, "name=") {
+			return 0
+		}
+		if strings.HasPrefix(attr, "property=") {
+			return 1
+		}
+		return 2
+	}
 	sort.SliceStable(attrs, func(i, j int) bool {
-		iPriority := attrPriority(attrs[i])
-		jPriority := attrPriority(attrs[j])
-		if iPriority != jPriority {
-			return iPriority < jPriority
+		pi, pj := priority(attrs[i]), priority(attrs[j])
+		if pi != pj {
+			return pi < pj
 		}
 		return attrs[i] < attrs[j]
 	})
-}
-
-func attrPriority(attr string) int {
-	if strings.HasPrefix(attr, "name=") {
-		return 0
-	}
-	if strings.HasPrefix(attr, "property=") {
-		return 1
-	}
-	return 2
 }
 
 func metaTagsFromProps(props map[string]any) []metaTag {
@@ -646,9 +645,9 @@ func parseMetaArray(metaArray []any) []metaTag {
 }
 
 func buildDefaultMetaTags(props map[string]any) []metaTag {
-	title := stringProp(props, "title")
+	title := stringFromMap(props, "title")
 	if title == "" {
-		title = "Page"
+		title = "Alloy"
 	}
 
 	return []metaTag{
@@ -658,50 +657,18 @@ func buildDefaultMetaTags(props map[string]any) []metaTag {
 }
 
 func isValidMetaTag(tag metaTag) bool {
-	if tag.Title != "" {
+	if tag.Title != "" || (tag.Name != "" && tag.Content != "") || (tag.Property != "" && tag.Content != "") || (tag.Rel != "" && tag.Href != "") {
 		return true
 	}
-
-	if tag.Name != "" && tag.Content != "" {
-		return true
-	}
-
-	if tag.Property != "" && tag.Content != "" {
-		return true
-	}
-
-	if tag.Rel != "" && tag.Href != "" {
-		return true
-	}
-
 	if tag.TagName != "" {
-		return tag.Name != "" || tag.Property != "" ||
-			tag.Content != "" || tag.Rel != "" || tag.Href != ""
+		return tag.Name != "" || tag.Property != "" || tag.Content != "" || tag.Rel != "" || tag.Href != ""
 	}
-
 	return false
 }
 
 func stringFromMap(m map[string]any, key string) string {
-	if len(m) == 0 {
-		return ""
-	}
-	val, ok := m[key]
-	if !ok {
-		return ""
-	}
-	str, ok := val.(string)
-	if !ok {
-		return ""
-	}
+	str, _ := m[key].(string)
 	return str
-}
-
-func stringProp(props map[string]any, key string) string {
-	if len(props) == 0 {
-		return ""
-	}
-	return stringFromMap(props, key)
 }
 
 // RenderTSXFileWithHydration renders with client-side hydration support
@@ -713,24 +680,24 @@ func RenderTSXFileWithHydration(filePath string, props map[string]any, rootID st
 func RenderTSXFileWithHydrationWithContext(ctx context.Context, filePath string, props map[string]any, rootID string) (*RenderResult, error) {
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("resolve path: %w", err)
+		return nil, fmt.Errorf("resolve component path %s: %w", filePath, err)
 	}
 
 	if _, err := os.Stat(absPath); err != nil {
-		return nil, fmt.Errorf("stat component: %w", err)
+		return nil, fmt.Errorf("component not found %s: %w", absPath, err)
 	}
 
 	dir := filepath.Dir(absPath)
 	cssPath := filepath.Join(dir, "app.css")
 	if _, err := os.Stat(cssPath); err != nil {
-		return nil, fmt.Errorf("missing css file: %w", err)
+		return nil, fmt.Errorf("missing app.css at %s: %w", cssPath, err)
 	}
 
 	devMode := isDevMode()
 	serverJS, clientJS, css := readBundlesFromCache(absPath, rootID)
 	if serverJS == "" || clientJS == "" || css == "" {
 		if !devMode {
-			return nil, fmt.Errorf("bundle not registered for %s (root %s); use RegisterPrebuiltBundle before serving in production", absPath, rootID)
+			return nil, fmt.Errorf("component %s (rootID=%s) not registered; call RegisterPrebuiltBundle in production", absPath, rootID)
 		}
 
 		var deps []string
@@ -751,17 +718,9 @@ func RenderTSXFileWithHydrationWithContext(ctx context.Context, filePath string,
 		}
 	}
 
-	if os.Getenv("ALLOY_DEBUG_BUNDLE") != "" {
-		fmt.Println("render path server len:", len(serverJS))
-	}
-
-	propsSize := propsSizeBytes(props)
-
-	html, err := renderWithMetrics(absPath, propsSize, func() (string, error) {
-		return executeSSR(ctx, absPath, serverJS, props)
-	})
+	html, err := executeSSR(ctx, absPath, serverJS, props)
 	if err != nil {
-		return nil, fmt.Errorf("ssr error: %w", err)
+		return nil, fmt.Errorf("ssr failed for %s: %w", absPath, err)
 	}
 
 	return &RenderResult{
@@ -785,21 +744,17 @@ func RenderPrebuiltWithContext(ctx context.Context, filePath string, props map[s
 
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("resolve path: %w", err)
+		return nil, fmt.Errorf("resolve component path %s: %w", filePath, err)
 	}
 
 	serverJS, clientJS, css := readBundlesFromCache(absPath, rootID)
 	if serverJS == "" || clientJS == "" || css == "" {
-		return nil, fmt.Errorf("bundle not registered for %s (root %s); use RegisterPrebuiltBundle before serving", absPath, rootID)
+		return nil, fmt.Errorf("component %s (rootID=%s) not registered; call RegisterPrebuiltBundleFromFS before serving", absPath, rootID)
 	}
 
-	propsSize := propsSizeBytes(props)
-
-	html, err := renderWithMetrics(absPath, propsSize, func() (string, error) {
-		return executeSSR(ctx, absPath, serverJS, props)
-	})
+	html, err := executeSSR(ctx, absPath, serverJS, props)
 	if err != nil {
-		return nil, fmt.Errorf("ssr error: %w", err)
+		return nil, fmt.Errorf("ssr failed for %s: %w", absPath, err)
 	}
 
 	paths := []string{ensureLeadingSlash(filepath.ToSlash(files.Client))}
@@ -817,26 +772,18 @@ func RenderPrebuiltWithContext(ctx context.Context, filePath string, props map[s
 func BuildServerBundle(filePath string) (string, []string, error) {
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
-		return "", nil, fmt.Errorf("resolve path: %w", err)
+		return "", nil, fmt.Errorf("resolve component path %s: %w", filePath, err)
 	}
 	if _, err := os.Stat(absPath); err != nil {
-		return "", nil, fmt.Errorf("stat component: %w", err)
+		return "", nil, fmt.Errorf("component not found %s: %w", absPath, err)
 	}
 
 	serverJS, deps, err := bundleTSXFile(absPath)
 	if err != nil {
-		return "", nil, fmt.Errorf("server bundle error: %w", err)
+		return "", nil, fmt.Errorf("bundle server %s: %w", absPath, err)
 	}
 
 	return serverJS, deps, nil
-}
-
-type manifestEntry struct {
-	Server string   `json:"server"`
-	Client string   `json:"client,omitempty"`
-	CSS    string   `json:"css"`
-	Chunks []string `json:"chunks,omitempty"`
-	Shared string   `json:"sharedCss,omitempty"`
 }
 
 func writeManifestEntry(dir string, name string, files *PrebuiltFiles) error {
@@ -945,37 +892,33 @@ func baseNames(paths []string) []string {
 	return out
 }
 
-type routeEntry struct {
-	segments []routeSegment
-	page     Page
-	rootID   string
-	files    PrebuiltFiles
-}
-
-type routeSegment struct {
-	literal string
-	param   string
-}
-
-type routeParamsKey struct{}
-
 // RouteParams returns named params captured from the matched route, if any.
 func RouteParams(r *http.Request) map[string]string {
 	if r == nil {
 		return nil
 	}
-
-	val := r.Context().Value(routeParamsKey{})
-	if val == nil {
-		return nil
-	}
-
-	params, ok := val.(map[string]string)
-	if !ok {
-		return nil
-	}
-
+	params, _ := r.Context().Value(routeParamsKey{}).(map[string]string)
 	return params
+}
+
+func cleanPath(p string) string {
+	if p == "" {
+		return "/"
+	}
+
+	cleaned := path.Clean(p)
+	if !strings.HasPrefix(cleaned, "/") {
+		cleaned = "/" + cleaned
+	}
+
+	if cleaned != "/" {
+		cleaned = strings.TrimSuffix(cleaned, "/")
+		if cleaned == "" {
+			return "/"
+		}
+	}
+
+	return cleaned
 }
 
 func parseRoutePattern(pattern string) ([]routeSegment, error) {
@@ -983,16 +926,7 @@ func parseRoutePattern(pattern string) ([]routeSegment, error) {
 		return nil, fmt.Errorf("route required")
 	}
 
-	cleaned := path.Clean(pattern)
-	if !strings.HasPrefix(cleaned, "/") {
-		cleaned = "/" + cleaned
-	}
-	if cleaned != "/" {
-		cleaned = strings.TrimSuffix(cleaned, "/")
-		if cleaned == "" {
-			cleaned = "/"
-		}
-	}
+	cleaned := cleanPath(pattern)
 
 	if cleaned == "/" {
 		return nil, nil
@@ -1018,28 +952,8 @@ func parseRoutePattern(pattern string) ([]routeSegment, error) {
 	return segments, nil
 }
 
-func cleanRequestPath(p string) string {
-	if p == "" {
-		return "/"
-	}
-
-	cleaned := path.Clean(p)
-	if !strings.HasPrefix(cleaned, "/") {
-		cleaned = "/" + cleaned
-	}
-
-	if cleaned != "/" {
-		cleaned = strings.TrimSuffix(cleaned, "/")
-		if cleaned == "" {
-			return "/"
-		}
-	}
-
-	return cleaned
-}
-
 func matchRoute(segments []routeSegment, requestPath string) (map[string]string, bool) {
-	cleaned := cleanRequestPath(requestPath)
+	cleaned := cleanPath(requestPath)
 	if cleaned == "/" && len(segments) == 0 {
 		return nil, true
 	}
@@ -1136,10 +1050,10 @@ func RegisterPages(mux *http.ServeMux, filesystem fs.FS, pages []Page) error {
 	}
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		path := cleanRequestPath(r.URL.Path)
+		reqPath := cleanPath(r.URL.Path)
 
 		for _, entry := range routeEntries {
-			params, ok := matchRoute(entry.segments, path)
+			params, ok := matchRoute(entry.segments, reqPath)
 			if !ok {
 				continue
 			}
@@ -1242,17 +1156,6 @@ func WithPublicAssets(next http.HandlerFunc, filesystem fs.FS) http.HandlerFunc 
 	return handler.ServeHTTP
 }
 
-type publicAssetsHandler struct {
-	next  http.Handler
-	roots []assetRoot
-}
-
-type assetRoot struct {
-	prefix     string
-	fs         fs.FS
-	fileServer http.Handler
-}
-
 func (r assetRoot) match(assetPath string) (string, bool) {
 	if r.prefix == "" {
 		return assetPath, true
@@ -1294,7 +1197,7 @@ func (r assetRoot) serve(w http.ResponseWriter, req *http.Request, relPath strin
 	r.fileServer.ServeHTTP(w, cloned)
 }
 
-func (r assetRoot) assetMeta(relPath string) (string, time.Time) {
+func (r assetRoot) assetMeta(relPath string, hashed bool) (string, time.Time) {
 	if r.fs == nil {
 		return "", time.Time{}
 	}
@@ -1302,6 +1205,11 @@ func (r assetRoot) assetMeta(relPath string) (string, time.Time) {
 	info, err := fs.Stat(r.fs, relPath)
 	if err != nil {
 		return "", time.Time{}
+	}
+
+	if hashed {
+		etag := fmt.Sprintf(`"%x-%d"`, info.ModTime().UnixNano(), info.Size())
+		return etag, info.ModTime()
 	}
 
 	data, err := fs.ReadFile(r.fs, relPath)
@@ -1315,13 +1223,14 @@ func (r assetRoot) assetMeta(relPath string) (string, time.Time) {
 }
 
 func addCacheHeaders(w http.ResponseWriter, assetPath string, root assetRoot, relPath string) {
+	hashed := isHashedAsset(assetPath)
 	cacheValue := "public, max-age=300"
-	if isHashedAsset(assetPath) {
+	if hashed {
 		cacheValue = "public, max-age=31536000, immutable"
 	}
 	w.Header().Set("Cache-Control", cacheValue)
 
-	etag, modTime := root.assetMeta(relPath)
+	etag, modTime := root.assetMeta(relPath, hashed)
 	if etag != "" {
 		w.Header().Set("ETag", etag)
 	}
@@ -1742,61 +1651,43 @@ func isDevMode() bool {
 }
 
 func buildAll(componentPath string, rootID string) (string, string, string, []string, error) {
-	var wg sync.WaitGroup
-	wg.Add(3)
+	var serverJS, clientJS, css string
+	var serverDeps, clientDeps, cssDeps []string
 
-	var serverJS string
-	var clientJS string
-	var css string
-	var serverDeps []string
-	var clientDeps []string
-	var cssDeps []string
-	errs := make(chan error, 3)
+	var g errgroup.Group
 
-	go func() {
-		defer wg.Done()
-		b, deps, buildErr := bundleTSXFile(componentPath)
-		if buildErr != nil {
-			errs <- fmt.Errorf("server bundle error: %w", buildErr)
-			return
+	g.Go(func() error {
+		b, deps, err := bundleTSXFile(componentPath)
+		if err != nil {
+			return fmt.Errorf("bundle server %s: %w", componentPath, err)
 		}
 		serverJS = b
 		serverDeps = deps
-	}()
+		return nil
+	})
 
-	go func() {
-		defer wg.Done()
-		b, deps, buildErr := bundleClientJS(componentPath, rootID)
-		if buildErr != nil {
-			errs <- fmt.Errorf("client bundle error: %w", buildErr)
-			return
+	g.Go(func() error {
+		b, deps, err := bundleClientJS(componentPath, rootID)
+		if err != nil {
+			return fmt.Errorf("bundle client %s: %w", componentPath, err)
 		}
 		clientJS = b
 		clientDeps = deps
-	}()
+		return nil
+	})
 
-	go func() {
-		defer wg.Done()
-		out, deps, buildErr := buildTailwindCSS(componentPath)
-		if buildErr != nil {
-			errs <- fmt.Errorf("css error: %w", buildErr)
-			return
+	g.Go(func() error {
+		out, deps, err := buildTailwindCSS(componentPath)
+		if err != nil {
+			return fmt.Errorf("build css for %s: %w", componentPath, err)
 		}
 		css = out
 		cssDeps = deps
-	}()
+		return nil
+	})
 
-	wg.Wait()
-	close(errs)
-
-	for err := range errs {
-		if err != nil {
-			return "", "", "", nil, err
-		}
-	}
-
-	if os.Getenv("ALLOY_DEBUG_BUNDLE") != "" {
-		fmt.Println("buildAll lengths:", len(serverJS), len(clientJS), len(css))
+	if err := g.Wait(); err != nil {
+		return "", "", "", nil, err
 	}
 
 	deps := mergePaths(serverDeps, clientDeps, cssDeps)
@@ -1843,13 +1734,6 @@ func sha1String(s string) []byte {
 	return h.Sum(nil)
 }
 
-type tailwindWatcher struct {
-	outputPath string
-	cmd        *exec.Cmd
-	ready      chan struct{}
-	errCh      chan error
-}
-
 var tailwindWatchers = struct {
 	sync.Mutex
 	w map[string]*tailwindWatcher
@@ -1862,26 +1746,9 @@ func ensureTailwindWatcher(componentPath string, cssPath string) (string, error)
 
 	tailwindWatchers.Lock()
 	existing := tailwindWatchers.w[cssPath]
-	tailwindWatchers.Unlock()
-
 	if existing != nil {
-		select {
-		case <-existing.ready:
-			select {
-			case err := <-existing.errCh:
-				if err != nil {
-					return "", err
-				}
-			default:
-			}
-			info, err := os.Stat(existing.outputPath)
-			if err == nil && info.Size() > 0 {
-				return existing.outputPath, nil
-			}
-			return "", fmt.Errorf("tailwind watch output not ready")
-		case <-time.After(5 * time.Second):
-			return "", fmt.Errorf("tailwind watch not ready")
-		}
+		tailwindWatchers.Unlock()
+		return waitForWatcher(existing)
 	}
 
 	outputPath := filepath.Join(findPackageRoot(filepath.Dir(cssPath)), ".alloy-cache", "tailwind-watch-"+filepath.Base(cssPath)+".css")
@@ -1893,9 +1760,9 @@ func ensureTailwindWatcher(componentPath string, cssPath string) (string, error)
 		"-o", outputPath,
 		"--content", contentPattern,
 		"--watch",
-		"--poll=500",
 	)
 	if err != nil {
+		tailwindWatchers.Unlock()
 		return "", err
 	}
 	cmd.Stdout = os.Stdout
@@ -1908,7 +1775,6 @@ func ensureTailwindWatcher(componentPath string, cssPath string) (string, error)
 		errCh:      make(chan error, 1),
 	}
 
-	tailwindWatchers.Lock()
 	tailwindWatchers.w[cssPath] = watcher
 	tailwindWatchers.Unlock()
 
@@ -1920,8 +1786,19 @@ func ensureTailwindWatcher(componentPath string, cssPath string) (string, error)
 			return
 		}
 
+		go func() {
+			err := cmd.Wait()
+			if err != nil {
+				select {
+				case watcher.errCh <- err:
+				default:
+				}
+			}
+			clearWatcher(cssPath)
+		}()
+
 		// Wait for initial output
-		for i := 0; i < 20; i++ {
+		for range 20 {
 			if info, err := os.Stat(outputPath); err == nil && info.Size() > 0 {
 				close(watcher.ready)
 				return
@@ -1933,6 +1810,10 @@ func ensureTailwindWatcher(componentPath string, cssPath string) (string, error)
 		clearWatcher(cssPath)
 	}()
 
+	return waitForWatcher(watcher)
+}
+
+func waitForWatcher(watcher *tailwindWatcher) (string, error) {
 	select {
 	case <-watcher.ready:
 		select {
@@ -1942,12 +1823,13 @@ func ensureTailwindWatcher(componentPath string, cssPath string) (string, error)
 			}
 		default:
 		}
-		if info, err := os.Stat(outputPath); err == nil && info.Size() > 0 {
-			return outputPath, nil
+		info, err := os.Stat(watcher.outputPath)
+		if err == nil && info.Size() > 0 {
+			return watcher.outputPath, nil
 		}
 		return "", fmt.Errorf("tailwind watch output not ready")
-	case <-time.After(3 * time.Second):
-		return "", fmt.Errorf("tailwind watch start timeout")
+	case <-time.After(5 * time.Second):
+		return "", fmt.Errorf("tailwind watch not ready")
 	}
 }
 
@@ -2021,25 +1903,21 @@ export default function render(props: any) {
 	})
 
 	if len(result.Errors) > 0 {
-		return "", nil, fmt.Errorf("%s", result.Errors[0].Text)
+		return "", nil, fmt.Errorf("esbuild server bundle %s: %s", absPath, result.Errors[0].Text)
 	}
 
 	if len(result.OutputFiles) == 0 {
-		return "", nil, fmt.Errorf("no output from esbuild")
+		return "", nil, fmt.Errorf("esbuild produced no server bundle for %s", absPath)
 	}
 
 	deps, err := bundleInputs(result.Metafile)
 	if err != nil {
-		return "", nil, err
+		return "", nil, fmt.Errorf("parse server metafile %s: %w", absPath, err)
 	}
 
 	deps = filterOutPath(deps, entryPath)
 
-	serverCode := string(result.OutputFiles[0].Contents)
-	if os.Getenv("ALLOY_DEBUG_BUNDLE") != "" {
-		_ = os.WriteFile("/tmp/alloy-server.js", []byte(serverCode), 0644)
-	}
-	return serverCode, deps, nil
+	return string(result.OutputFiles[0].Contents), deps, nil
 }
 
 // bundleClientJS creates browser bundle for hydration
@@ -2082,7 +1960,7 @@ if (rootEl) {
 		Bundle:           true,
 		Write:            false,
 		Metafile:         true,
-		Format:           api.FormatIIFE,
+		Format:           api.FormatESModule,
 		MinifyWhitespace: minify,
 		MinifySyntax:     minify,
 		Target:           api.ES2020,
@@ -2094,16 +1972,16 @@ if (rootEl) {
 	})
 
 	if len(result.Errors) > 0 {
-		return "", nil, fmt.Errorf("%s", result.Errors[0].Text)
+		return "", nil, fmt.Errorf("esbuild client bundle %s: %s", absPath, result.Errors[0].Text)
 	}
 
 	if len(result.OutputFiles) == 0 {
-		return "", nil, fmt.Errorf("no output from esbuild")
+		return "", nil, fmt.Errorf("esbuild produced no client bundle for %s", absPath)
 	}
 
 	deps, err := bundleInputs(result.Metafile)
 	if err != nil {
-		return "", nil, err
+		return "", nil, fmt.Errorf("parse client metafile %s: %w", absPath, err)
 	}
 
 	deps = filterOutPath(deps, entryPath)
@@ -2119,14 +1997,14 @@ func buildTailwindCSS(componentPath string) (string, []string, error) {
 
 	componentInfo, err := os.Stat(absPath)
 	if err != nil {
-		return "", nil, fmt.Errorf("stat component: %w", err)
+		return "", nil, fmt.Errorf("component not found %s: %w", absPath, err)
 	}
 
 	dir := filepath.Dir(absPath)
 	cssPath := filepath.Join(dir, "app.css")
 	cssInfo, err := os.Stat(cssPath)
 	if err != nil {
-		return "", nil, fmt.Errorf("missing css file: %w", err)
+		return "", nil, fmt.Errorf("missing app.css at %s: %w", cssPath, err)
 	}
 
 	cssDeps := []string{cssPath}
@@ -2197,7 +2075,7 @@ func runTailwind(cssPath string, root string) (string, error) {
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("tailwind cli: %v: %s", err, strings.TrimSpace(string(output)))
+		return "", fmt.Errorf("tailwind build %s: %w: %s", cssPath, err, strings.TrimSpace(string(output)))
 	}
 
 	css, err := os.ReadFile(outputPath)
@@ -2272,19 +2150,13 @@ func fileExists(path string) bool {
 }
 
 func readBundlesFromCache(path string, rootID string) (string, string, string) {
-	bundleCache.Lock()
+	bundleCache.RLock()
 	entry := bundleCache.entries[path]
-	bundleCache.Unlock()
-
-	if entry == nil {
+	bundleCache.RUnlock()
+	if entry == nil || entryStale(entry) {
 		return "", "", ""
 	}
-	if entryStale(entry) {
-		return "", "", ""
-	}
-
-	client := entry.clientByID[rootID]
-	return entry.serverJS, client, entry.css
+	return entry.serverJS, entry.clientByID[rootID], entry.css
 }
 
 func storeBundles(path string, rootID string, serverJS string, clientJS string, css string, deps map[string]fileStamp) {
@@ -2324,34 +2196,22 @@ func executeSSR(ctx context.Context, componentPath string, jsCode string, props 
 	if ctx == nil {
 		ctx = context.Background()
 	}
-
-	timeout := currentRenderTimeout()
-	var cancel context.CancelFunc
-	if timeout > 0 {
+	if timeout := currentRenderTimeout(); timeout > 0 {
+		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
-	defer func() {
-		if cancel != nil {
-			cancel()
-		}
-	}()
 
 	vm, err := jsPool.acquire(ctx)
 	if err != nil {
 		return "", fmt.Errorf("acquire runtime: %w", err)
 	}
+	defer jsPool.release(vm)
 
 	vm.rt.SetInterruptHandler(makeInterruptHandler(ctx))
-	html, runErr := runSSR(vm.ctx, jsCode, props)
-	vm.rt.ClearInterruptHandler()
+	defer vm.rt.ClearInterruptHandler()
 
-	if runErr != nil {
-		jsPool.release(vm)
-		return "", runErr
-	}
-
-	jsPool.release(vm)
-	return html, nil
+	return runSSR(vm.ctx, jsCode, props)
 }
 
 func makeInterruptHandler(ctx context.Context) quickjs.InterruptHandler {
@@ -2372,27 +2232,13 @@ func runSSR(ctx *quickjs.Context, jsCode string, props map[string]any) (string, 
 	result := ctx.Eval(jsCode)
 	if result.IsException() {
 		result.Free()
-		return "", fmt.Errorf("component eval: %s", ctx.Exception())
+		return "", fmt.Errorf("eval component bundle: %s", ctx.Exception())
 	}
 	defer result.Free()
 
-	if os.Getenv("ALLOY_DEBUG_BUNDLE") != "" {
-		fmt.Println("serverJS length:", len(jsCode))
-
-		fmt.Println("bundle eval undefined?", result.IsUndefined(), "null?", result.IsNull())
-
-		typeofComponent := ctx.Eval("typeof __Component")
-		fmt.Println("typeof __Component:", typeofComponent.String())
-		typeofComponent.Free()
-
-		typeofDefault := ctx.Eval("typeof __Component.default")
-		fmt.Println("typeof __Component.default:", typeofDefault.String())
-		typeofDefault.Free()
-	}
-
 	propsJSON, err := json.Marshal(props)
 	if err != nil {
-		return "", fmt.Errorf("props marshal: %w", err)
+		return "", fmt.Errorf("marshal props: %w", err)
 	}
 
 	renderCode := fmt.Sprintf(`
@@ -2406,49 +2252,10 @@ func runSSR(ctx *quickjs.Context, jsCode string, props map[string]any) (string, 
 	defer renderResult.Free()
 
 	if !renderResult.IsString() {
-		return "", fmt.Errorf("expected string result, got %s", renderResult.String())
+		return "", fmt.Errorf("render returned non-string: %s", renderResult.String())
 	}
 
 	return renderResult.String(), nil
-}
-
-func renderWithMetrics(componentPath string, propsSize int, render func() (string, error)) (string, error) {
-	start := time.Now()
-	html, err := render()
-	outcome := RenderOutcomeSuccess
-	if err != nil {
-		outcome = RenderOutcomeError
-	}
-	recordRender(componentPath, time.Since(start), outcome, propsSize)
-	return html, err
-}
-
-func recordRender(component string, duration time.Duration, outcome RenderOutcome, propsBytes int) {
-	rec := metricsRecorder.Load()
-	if rec == nil {
-		return
-	}
-	recorder, ok := rec.(MetricsRecorder)
-	if !ok {
-		return
-	}
-	recorder.RecordRender(component, duration, outcome, propsBytes)
-}
-
-func propsSizeBytes(props map[string]any) int {
-	if len(props) == 0 {
-		return 0
-	}
-	data, err := json.Marshal(props)
-	if err != nil {
-		return 0
-	}
-	return len(data)
-}
-
-type fileStamp struct {
-	modTime time.Time
-	size    int64
 }
 
 func bundleInputs(meta string) ([]string, error) {
@@ -2512,20 +2319,12 @@ func cacheStale(stamps map[string]fileStamp) bool {
 	if len(stamps) == 0 {
 		return true
 	}
-
 	for path, stamp := range stamps {
 		info, err := os.Stat(path)
-		if err != nil {
-			return true
-		}
-		if !info.ModTime().Equal(stamp.modTime) {
-			return true
-		}
-		if info.Size() != stamp.size {
+		if err != nil || !info.ModTime().Equal(stamp.modTime) || info.Size() != stamp.size {
 			return true
 		}
 	}
-
 	return false
 }
 

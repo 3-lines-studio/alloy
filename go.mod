@@ -8,6 +8,7 @@ require (
 	github.com/evanw/esbuild v0.27.0
 	github.com/yuin/goldmark v1.7.8
 	github.com/yuin/goldmark-highlighting/v2 v2.0.0-20230729083705-37449abec8cc
+	golang.org/x/sync v0.18.0
 )
 
 require (

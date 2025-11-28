@@ -174,7 +174,7 @@ export default function Page() {
 	if err == nil {
 		t.Fatalf("expected error when css file is missing")
 	}
-	if !strings.Contains(err.Error(), "missing css file") {
+	if !strings.Contains(err.Error(), "missing app.css") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -195,7 +195,7 @@ func TestRenderTSXFileWithHydrationRequiresRegisteredInProd(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error when bundle not registered in prod")
 	}
-	if !strings.Contains(err.Error(), "bundle not registered") {
+	if !strings.Contains(err.Error(), "not registered") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -882,7 +882,7 @@ func TestMetaTagsArrayFormat(t *testing.T) {
 				"meta": []map[string]any{},
 			},
 			contains: []string{
-				"<title>Page</title>",
+				"<title>Alloy</title>",
 				`<meta name="viewport"`,
 			},
 		},

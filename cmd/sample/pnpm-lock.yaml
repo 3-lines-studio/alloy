@@ -16,7 +16,7 @@ importers:
         version: 18.3.1(react@18.3.1)
     devDependencies:
       '@tailwindcss/cli':
-        specifier: ^4.1.17
+        specifier: ^4
         version: 4.1.17
       '@types/react':
         specifier: ^18
@@ -25,7 +25,7 @@ importers:
         specifier: ^18
         version: 18.3.7(@types/react@18.3.27)
       tailwindcss:
-        specifier: ^4.1.17
+        specifier: ^4
         version: 4.1.17
 
 packages:
