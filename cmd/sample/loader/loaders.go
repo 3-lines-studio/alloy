@@ -3,8 +3,6 @@ package loader
 import (
 	"net/http"
 	"time"
-
-	"github.com/3-lines-studio/alloy"
 )
 
 func Home(r *http.Request) map[string]any {
@@ -27,8 +25,7 @@ func Home(r *http.Request) map[string]any {
 }
 
 func Blog(r *http.Request) map[string]any {
-	params := alloy.RouteParams(r)
-	slug := params["slug"]
+	slug := r.PathValue("slug")
 	title := "Alloy blog"
 	if slug != "" {
 		title = "Blog: " + slug
@@ -55,9 +52,8 @@ func Blog(r *http.Request) map[string]any {
 }
 
 func Product(r *http.Request) map[string]any {
-	params := alloy.RouteParams(r)
-	store := params["store-slug"]
-	product := params["product-slug"]
+	store := r.PathValue("store-slug")
+	product := r.PathValue("product-slug")
 	title := "Product detail"
 	if store != "" && product != "" {
 		title = store + " / " + product

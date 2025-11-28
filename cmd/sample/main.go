@@ -13,35 +13,13 @@ import (
 var dist embed.FS
 
 func main() {
-	pages := []alloy.Page{
-		{
-			Route:     "/",
-			Component: "app/pages/home.tsx",
-			Props:     loader.Home,
-		},
-		{
-			Route:     "/blog/:slug",
-			Component: "app/pages/home.tsx",
-			Props:     loader.Blog,
-		},
-		{
-			Route:     "/store/:store-slug/product/:product-slug",
-			Component: "app/pages/product.tsx",
-			Props:     loader.Product,
-		},
-		{
-			Route:     "/about",
-			Component: "app/pages/about.tsx",
-		},
-	}
-
-	handler, err := alloy.Handler(dist, pages)
-	if err != nil {
-		log.Fatal(err)
-	}
+	alloy.Init(dist)
 
 	mux := http.NewServeMux()
-	mux.Handle("/", handler)
+	mux.Handle("/", alloy.NewPage("app/pages/home.tsx").WithLoader(loader.Home))
+	mux.Handle("/blog/{slug}", alloy.NewPage("app/pages/home.tsx").WithLoader(loader.Blog))
+	mux.Handle("/store/{store-slug}/product/{product-slug}", alloy.NewPage("app/pages/product.tsx").WithLoader(loader.Product))
+	mux.Handle("/about", alloy.NewPage("app/pages/about.tsx"))
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))

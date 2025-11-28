@@ -13,26 +13,11 @@ import (
 var dist embed.FS
 
 func main() {
-	pages := []alloy.Page{
-		{
-			Route:     "/",
-			Component: "app/pages/home.tsx",
-			Props:     loader.Home,
-		},
-		{
-			Route:     "/:slug",
-			Component: "app/pages/docs.tsx",
-			Props:     loader.Docs,
-		},
-	}
-
-	handler, err := alloy.Handler(dist, pages)
-	if err != nil {
-		log.Fatal(err)
-	}
+	alloy.Init(dist)
 
 	mux := http.NewServeMux()
-	mux.Handle("/", handler)
+	mux.Handle("/", alloy.NewPage("app/pages/home.tsx").WithLoader(loader.Home))
+	mux.Handle("/{slug}", alloy.NewPage("app/pages/docs.tsx").WithLoader(loader.Docs))
 
 	log.Println("Running @ http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", mux))

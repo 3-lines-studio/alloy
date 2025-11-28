@@ -3,10 +3,6 @@ package alloy
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"io/fs"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path"
 	"path/filepath"
@@ -22,11 +18,7 @@ func TestRenderTSXFileWithHydration(t *testing.T) {
 	componentPath := filepath.Join(sampleDir, "app", "pages", "home.tsx")
 	rootID := defaultRootID(componentPath)
 
-	page := Page{
-		Component: "app/pages/home.tsx",
-		Name:      "home",
-	}
-	files, err := resolvePrebuiltFiles(os.DirFS(sampleDir), page)
+	files, err := resolvePrebuiltFiles(os.DirFS(sampleDir), "app/pages/home.tsx", "", "home")
 	if err != nil {
 		t.Fatalf("resolve prebuilt files: %v", err)
 	}
@@ -59,97 +51,6 @@ func TestRenderTSXFileWithHydration(t *testing.T) {
 	}
 }
 
-func TestRegisterPagesServesPrebuilt(t *testing.T) {
-	resetBundleCache()
-	t.Cleanup(resetBundleCache)
-	t.Setenv("ALLOY_DEV", "")
-
-	sampleDir := filepath.Join("cmd", "sample")
-	filesystem := os.DirFS(sampleDir)
-
-	pages := []Page{
-		{
-			Route:     "/",
-			Component: "app/pages/home.tsx",
-			Name:      "home",
-			Props: func(r *http.Request) map[string]any {
-				return map[string]any{"title": "Alloy sample", "items": []string{"First", "Second"}}
-			},
-		},
-	}
-
-	handler, err := Handler(filesystem, pages)
-	if err != nil {
-		t.Fatalf("pages handler: %v", err)
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	rr := httptest.NewRecorder()
-	handler(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status: want 200, got %d body: %s", rr.Code, rr.Body.String())
-	}
-	body := rr.Body.String()
-	if !strings.Contains(body, "Alloy sample") {
-		t.Fatalf("body missing title: %s", body)
-	}
-	if !strings.Contains(body, "First") {
-		t.Fatalf("body missing items: %s", body)
-	}
-}
-
-func TestRegisterPagesSupportsRouteParams(t *testing.T) {
-	resetBundleCache()
-	t.Cleanup(resetBundleCache)
-	t.Setenv("ALLOY_DEV", "")
-
-	dir := t.TempDir()
-	serverBundle := `var __Component = { default: function(props) { return "<div>slug:"+props.slug+"</div>"; } };`
-	if err := os.WriteFile(filepath.Join(dir, "server.js"), []byte(serverBundle), 0644); err != nil {
-		t.Fatalf("write server bundle: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "client.js"), []byte("console.log('client')"), 0644); err != nil {
-		t.Fatalf("write client bundle: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "style.css"), []byte("body{}"), 0644); err != nil {
-		t.Fatalf("write css bundle: %v", err)
-	}
-
-	filesystem := os.DirFS(dir)
-	pages := []Page{
-		{
-			Route:     "/blog/:slug",
-			Component: "pages/blog.tsx",
-			Files: PrebuiltFiles{
-				Server: "server.js",
-				Client: "client.js",
-				CSS:    "style.css",
-			},
-			Props: func(r *http.Request) map[string]any {
-				params := RouteParams(r)
-				slug := params["slug"]
-				return map[string]any{"slug": slug}
-			},
-		},
-	}
-
-	mux := http.NewServeMux()
-	if err := RegisterPages(mux, filesystem, pages); err != nil {
-		t.Fatalf("register pages: %v", err)
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/blog/hello-world", nil)
-	rr := httptest.NewRecorder()
-	mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status: got %d", rr.Code)
-	}
-	if !strings.Contains(rr.Body.String(), "hello-world") {
-		t.Fatalf("response missing slug: %s", rr.Body.String())
-	}
-}
 
 func TestRenderTSXFileWithHydrationRequiresCSS(t *testing.T) {
 	resetBundleCache()
@@ -201,143 +102,7 @@ func TestRenderTSXFileWithHydrationRequiresRegisteredInProd(t *testing.T) {
 	}
 }
 
-func TestWithPublicAssetsServesFiles(t *testing.T) {
-	dir := t.TempDir()
-	publicDir := filepath.Join(dir, "public")
-	if err := os.MkdirAll(publicDir, 0755); err != nil {
-		t.Fatalf("create public dir: %v", err)
-	}
 
-	assetContent := []byte("icon")
-	assetPath := filepath.Join(publicDir, "favicon.ico")
-	if err := os.WriteFile(assetPath, assetContent, 0644); err != nil {
-		t.Fatalf("write asset: %v", err)
-	}
-
-	nextStatus := http.StatusNoContent
-	nextCalled := false
-	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		nextCalled = true
-		w.WriteHeader(nextStatus)
-	})
-
-	handler := WithPublicAssets(next, os.DirFS(dir))
-
-	request := httptest.NewRequest(http.MethodGet, "/favicon.ico", nil)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-
-	body, err := io.ReadAll(response.Result().Body)
-	if err != nil {
-		t.Fatalf("read asset body: %v", err)
-	}
-
-	if response.Code != http.StatusOK {
-		t.Fatalf("asset status: want 200, got %d", response.Code)
-	}
-	if string(body) != string(assetContent) {
-		t.Fatalf("asset body mismatch: %q", string(body))
-	}
-	if got := response.Header().Get("Cache-Control"); got != "public, max-age=300" {
-		t.Fatalf("cache control: want %q, got %q", "public, max-age=300", got)
-	}
-	if etag := response.Header().Get("ETag"); etag == "" {
-		t.Fatalf("expected etag header")
-	}
-	if nextCalled {
-		t.Fatalf("next handler should not run for asset request")
-	}
-
-	nextCalled = false
-	fallbackRequest := httptest.NewRequest(http.MethodGet, "/unknown", nil)
-	fallbackResponse := httptest.NewRecorder()
-	handler.ServeHTTP(fallbackResponse, fallbackRequest)
-
-	if fallbackResponse.Code != nextStatus {
-		t.Fatalf("fallback status: want %d, got %d", nextStatus, fallbackResponse.Code)
-	}
-	if !nextCalled {
-		t.Fatalf("expected next handler for missing asset")
-	}
-}
-
-func TestWithPublicAssetsHashedAssetsCacheLonger(t *testing.T) {
-	dir := t.TempDir()
-	publicDir := filepath.Join(dir, "public")
-	if err := os.MkdirAll(publicDir, 0755); err != nil {
-		t.Fatalf("create public dir: %v", err)
-	}
-
-	assetContent := []byte("icon-hash")
-	assetPath := filepath.Join(publicDir, "logo-abcdef12.png")
-	if err := os.WriteFile(assetPath, assetContent, 0644); err != nil {
-		t.Fatalf("write asset: %v", err)
-	}
-
-	handler := WithPublicAssets(http.NotFound, os.DirFS(dir))
-
-	request := httptest.NewRequest(http.MethodGet, "/logo-abcdef12.png", nil)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-
-	if response.Code != http.StatusOK {
-		t.Fatalf("asset status: want 200, got %d", response.Code)
-	}
-	if got := response.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
-		t.Fatalf("cache control: want long cache, got %q", got)
-	}
-	if etag := response.Header().Get("ETag"); etag == "" {
-		t.Fatalf("expected etag header")
-	}
-}
-
-func TestWithPublicAssetsServesDistFiles(t *testing.T) {
-	sampleDir := filepath.Join("cmd", "sample")
-	filesystem := os.DirFS(sampleDir)
-
-	data, err := fs.ReadFile(filesystem, path.Join("dist", "manifest.json"))
-	if err != nil {
-		t.Fatalf("read manifest: %v", err)
-	}
-
-	var manifest map[string]manifestEntry
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		t.Fatalf("decode manifest: %v", err)
-	}
-	entry := manifest["home"]
-	if entry.Client == "" {
-		t.Fatalf("manifest missing client entry")
-	}
-
-	asset := path.Join("dist", entry.Client)
-	request := httptest.NewRequest(http.MethodGet, "/"+asset, nil)
-
-	handler := WithPublicAssets(http.NotFound, filesystem)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-
-	if response.Code != http.StatusOK {
-		t.Fatalf("asset status: want 200, got %d", response.Code)
-	}
-	if response.Header().Get("Cache-Control") == "" {
-		t.Fatalf("missing cache header")
-	}
-	if response.Body.Len() == 0 {
-		t.Fatalf("expected asset content")
-	}
-}
-
-func TestWithPublicAssetsHandlesMissingNext(t *testing.T) {
-	handler := WithPublicAssets(nil, os.DirFS("."))
-
-	request := httptest.NewRequest(http.MethodGet, "/any", nil)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-
-	if response.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 when next is nil, got %d", response.Code)
-	}
-}
 
 func TestRenderResultToHTMLWithAssets(t *testing.T) {
 	result := RenderResult{
@@ -625,14 +390,7 @@ func TestResolvePrebuiltFilesReadsManifest(t *testing.T) {
 		t.Fatalf("write manifest: %v", err)
 	}
 
-	page := Page{
-		Route:     "/",
-		Component: "pages/home.tsx",
-		Name:      "home",
-		DistDir:   "dist",
-	}
-
-	files, err := resolvePrebuiltFiles(os.DirFS(dir), page)
+	files, err := resolvePrebuiltFiles(os.DirFS(dir), "pages/home.tsx", "dist", "home")
 	if err != nil {
 		t.Fatalf("resolve files: %v", err)
 	}
@@ -757,36 +515,6 @@ export default function Page({ title }: { title: string }) {
 	})
 }
 
-func BenchmarkHandlerPrebuilt(b *testing.B) {
-	resetBundleCache()
-	sampleDir := filepath.Join("cmd", "sample")
-	filesystem := os.DirFS(sampleDir)
-
-	pages := []Page{
-		{
-			Route:     "/",
-			Component: "app/pages/home.tsx",
-			Name:      "home",
-			Props: func(r *http.Request) map[string]any {
-				return map[string]any{"title": "Alloy sample", "items": []string{"First", "Second"}}
-			},
-		},
-	}
-
-	handler, err := Handler(filesystem, pages)
-	if err != nil {
-		b.Fatalf("pages handler: %v", err)
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	for i := 0; i < b.N; i++ {
-		rr := httptest.NewRecorder()
-		handler(rr, req)
-		if rr.Code != http.StatusOK {
-			b.Fatalf("status: want 200, got %d", rr.Code)
-		}
-	}
-}
 
 func TestMetaTagsArrayFormat(t *testing.T) {
 	tests := []struct {

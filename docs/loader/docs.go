@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/3-lines-studio/alloy"
 	chromahtml "github.com/alecthomas/chroma/v2/formatters/html"
 	"github.com/yuin/goldmark"
 	highlighting "github.com/yuin/goldmark-highlighting/v2"
@@ -32,8 +31,7 @@ type DocEntry struct {
 }
 
 func Docs(r *http.Request) map[string]any {
-	params := alloy.RouteParams(r)
-	slug := strings.TrimSpace(params["slug"])
+	slug := strings.TrimSpace(r.PathValue("slug"))
 	contentDir := filepath.Join("app", "content")
 	entries := listDocs(contentDir)
 	if slug == "" && len(entries) > 0 {

@@ -67,18 +67,6 @@ type PrebuiltFiles struct {
 	CSS          string
 }
 
-// Page describes a routed component.
-type Page struct {
-	Route     string
-	Component string
-	RootID    string
-	Files     PrebuiltFiles
-	DistDir   string
-	Name      string
-	Props     func(r *http.Request) map[string]any
-	Ctx       func(r *http.Request) context.Context
-}
-
 // Internal runtime types
 type jsRuntime struct {
 	rt  *quickjs.Runtime
@@ -86,7 +74,6 @@ type jsRuntime struct {
 }
 
 type runtimePool struct {
-	mu   sync.Mutex
 	sem  chan struct{}
 	size int
 }
@@ -96,13 +83,7 @@ type bundleCacheEntry struct {
 	serverJS   string
 	clientByID map[string]string
 	css        string
-	deps       map[string]fileStamp
 	prebuilt   bool
-}
-
-type fileStamp struct {
-	ModTime time.Time `json:"modTime"`
-	Size    int64     `json:"size"`
 }
 
 type manifestEntry struct {
@@ -113,31 +94,11 @@ type manifestEntry struct {
 }
 
 // Internal handler types
-type publicAssetsHandler struct {
-	next  http.Handler
-	roots []assetRoot
-}
-
 type assetRoot struct {
 	prefix     string
 	fs         fs.FS
 	fileServer http.Handler
 }
-
-// Internal routing types
-type routeEntry struct {
-	segments []routeSegment
-	page     Page
-	rootID   string
-	files    PrebuiltFiles
-}
-
-type routeSegment struct {
-	literal string
-	param   string
-}
-
-type routeParamsKey struct{}
 
 // Internal helper types
 type metaTag struct {
@@ -153,11 +114,168 @@ type metaTag struct {
 var (
 	renderTimeout atomic.Value
 	jsPool        *runtimePool
+	globalConfig  atomic.Value
 )
+
+type Config struct {
+	FS              fs.FS
+	DefaultTitle    string
+	DefaultMeta     []metaTag
+	AppDir          string
+	PagesDir        string
+	DistDir         string
+	RenderTimeout   time.Duration
+	RuntimePoolSize int
+}
 
 func init() {
 	renderTimeout.Store(defaultRenderTimeout)
 	jsPool = newRuntimePool(defaultRuntimePoolSize())
+	globalConfig.Store(&Config{
+		DefaultTitle:    "Alloy",
+		AppDir:          DefaultAppDir,
+		PagesDir:        DefaultPagesDir,
+		DistDir:         DefaultDistDir,
+		RenderTimeout:   defaultRenderTimeout,
+		RuntimePoolSize: defaultRuntimePoolSize(),
+	})
+}
+
+// Init configures global settings for Alloy.
+func Init(filesystem fs.FS, options ...func(*Config)) {
+	cfg := &Config{
+		FS:              filesystem,
+		DefaultTitle:    "Alloy",
+		AppDir:          DefaultAppDir,
+		PagesDir:        DefaultPagesDir,
+		DistDir:         DefaultDistDir,
+		RenderTimeout:   defaultRenderTimeout,
+		RuntimePoolSize: defaultRuntimePoolSize(),
+	}
+
+	for _, opt := range options {
+		if opt != nil {
+			opt(cfg)
+		}
+	}
+
+	if cfg.RenderTimeout > 0 {
+		renderTimeout.Store(cfg.RenderTimeout)
+	}
+
+	if cfg.RuntimePoolSize > 0 && cfg.RuntimePoolSize != defaultRuntimePoolSize() {
+		jsPool = newRuntimePool(cfg.RuntimePoolSize)
+	}
+
+	globalConfig.Store(cfg)
+}
+
+func getConfig() *Config {
+	cfg, _ := globalConfig.Load().(*Config)
+	return cfg
+}
+
+// PageHandler provides a fluent API for building page handlers.
+type PageHandler struct {
+	component string
+	loader    func(r *http.Request) map[string]any
+	ctx       func(r *http.Request) context.Context
+}
+
+// NewPage creates a new PageHandler for the given component path.
+func NewPage(component string) *PageHandler {
+	return &PageHandler{
+		component: component,
+	}
+}
+
+// WithLoader sets the loader function for this page.
+func (h *PageHandler) WithLoader(loader func(r *http.Request) map[string]any) *PageHandler {
+	h.loader = loader
+	return h
+}
+
+// WithContext sets a custom context function for this page.
+func (h *PageHandler) WithContext(ctx func(r *http.Request) context.Context) *PageHandler {
+	h.ctx = ctx
+	return h
+}
+
+// ServeHTTP implements http.Handler.
+func (h *PageHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	cfg := getConfig()
+	if cfg == nil || cfg.FS == nil {
+		http.Error(w, "alloy not initialized: call alloy.Init(fs) first", http.StatusInternalServerError)
+		return
+	}
+
+	if tryServeAsset(w, r, cfg.FS) {
+		return
+	}
+
+	rootID := defaultRootID(h.component)
+	props := map[string]any{}
+	if h.loader != nil {
+		props = h.loader(r)
+	}
+
+	ctx := r.Context()
+	if h.ctx != nil {
+		custom := h.ctx(r)
+		if custom != nil {
+			ctx = custom
+		}
+	}
+
+	files, err := resolvePrebuiltFiles(cfg.FS, h.component, "", "")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if files.Server != "" {
+		if err := RegisterPrebuiltBundleFromFS(h.component, rootID, cfg.FS, files); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		ServePrebuiltPageWithContext(ctx, w, r, h.component, props, rootID, files)
+		return
+	}
+
+	ServePageWithContext(ctx, w, r, h.component, props, rootID)
+}
+
+func tryServeAsset(w http.ResponseWriter, r *http.Request, filesystem fs.FS) bool {
+	isAllowedMethod := r.Method == http.MethodGet || r.Method == http.MethodHead
+	if !isAllowedMethod {
+		return false
+	}
+
+	assetPath := normalizeAssetPath(r.URL.Path)
+	if assetPath == "" {
+		return false
+	}
+
+	roots := collectAssetRoots(filesystem)
+	for _, root := range roots {
+		rel, ok := root.match(assetPath)
+		if !ok {
+			continue
+		}
+		if !root.assetExists(rel) {
+			continue
+		}
+
+		fullPath := assetPath
+		if root.prefix != "" {
+			fullPath = path.Join(root.prefix, rel)
+		}
+		addCacheHeaders(w, fullPath, root, rel)
+		root.serve(w, r, rel)
+		return true
+	}
+
+	return false
 }
 
 func newRuntimePool(size int) *runtimePool {
@@ -844,92 +962,6 @@ func baseNames(paths []string) []string {
 	return out
 }
 
-// RouteParams returns named params captured from the matched route, if any.
-func RouteParams(r *http.Request) map[string]string {
-	if r == nil {
-		return nil
-	}
-	params, _ := r.Context().Value(routeParamsKey{}).(map[string]string)
-	return params
-}
-
-func cleanPath(p string) string {
-	if p == "" {
-		return "/"
-	}
-
-	cleaned := path.Clean(p)
-	if !strings.HasPrefix(cleaned, "/") {
-		cleaned = "/" + cleaned
-	}
-
-	if cleaned != "/" {
-		cleaned = strings.TrimSuffix(cleaned, "/")
-		if cleaned == "" {
-			return "/"
-		}
-	}
-
-	return cleaned
-}
-
-func parseRoutePattern(pattern string) ([]routeSegment, error) {
-	if pattern == "" {
-		return nil, fmt.Errorf("route required")
-	}
-
-	cleaned := cleanPath(pattern)
-
-	if cleaned == "/" {
-		return nil, nil
-	}
-
-	parts := strings.Split(strings.TrimPrefix(cleaned, "/"), "/")
-	segments := make([]routeSegment, 0, len(parts))
-	for _, part := range parts {
-		if part == "" {
-			return nil, fmt.Errorf("invalid route segment in %s", pattern)
-		}
-		if strings.HasPrefix(part, ":") {
-			name := strings.TrimPrefix(part, ":")
-			if name == "" {
-				return nil, fmt.Errorf("param name required in %s", pattern)
-			}
-			segments = append(segments, routeSegment{param: name})
-			continue
-		}
-		segments = append(segments, routeSegment{literal: part})
-	}
-
-	return segments, nil
-}
-
-func matchRoute(segments []routeSegment, requestPath string) (map[string]string, bool) {
-	cleaned := cleanPath(requestPath)
-	if cleaned == "/" && len(segments) == 0 {
-		return nil, true
-	}
-
-	parts := strings.Split(strings.TrimPrefix(cleaned, "/"), "/")
-	if len(parts) != len(segments) {
-		return nil, false
-	}
-
-	params := map[string]string{}
-	for i, seg := range segments {
-		part := parts[i]
-		if seg.literal != "" {
-			if part != seg.literal {
-				return nil, false
-			}
-			continue
-		}
-		params[seg.param] = part
-	}
-
-	return params, true
-}
-
 // RegisterPrebuiltBundleFromFS reads assets from an fs.FS and registers them.
 func RegisterPrebuiltBundleFromFS(componentPath string, rootID string, filesystem fs.FS, files PrebuiltFiles) error {
 	if filesystem == nil {
@@ -952,144 +984,6 @@ func RegisterPrebuiltBundleFromFS(componentPath string, rootID string, filesyste
 	}
 
 	return RegisterPrebuiltBundle(componentPath, rootID, string(serverBytes), string(clientBytes), string(cssBytes))
-}
-
-// RegisterPages registers routes and prebuilt bundles (when not in dev).
-func RegisterPages(mux *http.ServeMux, filesystem fs.FS, pages []Page) error {
-	if mux == nil {
-		return fmt.Errorf("mux required")
-	}
-	if len(pages) == 0 {
-		return nil
-	}
-
-	routeEntries := make([]routeEntry, 0, len(pages))
-
-	for _, p := range pages {
-		if p.Route == "" || p.Component == "" {
-			return fmt.Errorf("route and component path required")
-		}
-
-		rootID := p.RootID
-		if rootID == "" {
-			rootID = defaultRootID(p.Component)
-		}
-
-		var prebuiltFiles PrebuiltFiles
-		files, err := resolvePrebuiltFiles(filesystem, p)
-		if err != nil {
-			return err
-		}
-		if err := RegisterPrebuiltBundleFromFS(p.Component, rootID, filesystem, files); err != nil {
-			return err
-		}
-		prebuiltFiles = files
-
-		segments, err := parseRoutePattern(p.Route)
-		if err != nil {
-			return err
-		}
-
-		routeEntries = append(routeEntries, routeEntry{
-			segments: segments,
-			page:     p,
-			rootID:   rootID,
-			files:    prebuiltFiles,
-		})
-	}
-
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		reqPath := cleanPath(r.URL.Path)
-
-		for _, entry := range routeEntries {
-			params, ok := matchRoute(entry.segments, reqPath)
-			if !ok {
-				continue
-			}
-
-			req := r
-			if len(params) > 0 {
-				ctx := context.WithValue(r.Context(), routeParamsKey{}, params)
-				req = r.Clone(ctx)
-			}
-
-			props := map[string]any{}
-			if entry.page.Props != nil {
-				props = entry.page.Props(req)
-			}
-
-			ctx := req.Context()
-			if entry.page.Ctx != nil {
-				custom := entry.page.Ctx(req)
-				if custom != nil {
-					ctx = custom
-				}
-			}
-
-			if entry.files.Server != "" {
-				ServePrebuiltPageWithContext(ctx, w, req, entry.page.Component, props, entry.rootID, entry.files)
-				return
-			}
-
-			ServePageWithContext(ctx, w, req, entry.page.Component, props, entry.rootID)
-			return
-		}
-
-		http.NotFound(w, r)
-	})
-
-	return nil
-}
-
-// Handler builds an http.Handler with pages, and public assets.
-func Handler(filesystem fs.FS, pages []Page) (http.HandlerFunc, error) {
-	if filesystem == nil {
-		return nil, fmt.Errorf("filesystem required")
-	}
-
-	mux := http.NewServeMux()
-
-	if err := RegisterPages(mux, filesystem, pages); err != nil {
-		return nil, err
-	}
-
-	return WithPublicAssets(mux.ServeHTTP, filesystem), nil
-}
-
-// ListenAndServe starts an HTTP server with the provided pages and assets.
-func ListenAndServe(addr string, filesystem fs.FS, pages []Page) error {
-	handler, err := Handler(filesystem, pages)
-	if err != nil {
-		return err
-	}
-
-	return http.ListenAndServe(addr, handler)
-}
-
-// WithPublicAssets serves files from a "public" directory before falling back to the next handler.
-func WithPublicAssets(next http.HandlerFunc, filesystem fs.FS) http.HandlerFunc {
-	if next == nil {
-		return func(w http.ResponseWriter, _ *http.Request) {
-			http.Error(w, "next handler required", http.StatusInternalServerError)
-		}
-	}
-	if filesystem == nil {
-		return func(w http.ResponseWriter, _ *http.Request) {
-			http.Error(w, "filesystem required", http.StatusInternalServerError)
-		}
-	}
-
-	roots := collectAssetRoots(filesystem)
-	if len(roots) == 0 {
-		return next
-	}
-
-	handler := &publicAssetsHandler{
-		next:  next,
-		roots: roots,
-	}
-
-	return handler.ServeHTTP
 }
 
 func (r assetRoot) match(assetPath string) (string, bool) {
@@ -1376,40 +1270,6 @@ func collectAssetRoots(filesystem fs.FS) []assetRoot {
 	return roots
 }
 
-func (h *publicAssetsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	isAllowedMethod := r.Method == http.MethodGet || r.Method == http.MethodHead
-	if !isAllowedMethod {
-		h.next.ServeHTTP(w, r)
-		return
-	}
-
-	assetPath := normalizeAssetPath(r.URL.Path)
-	if assetPath == "" {
-		h.next.ServeHTTP(w, r)
-		return
-	}
-
-	for _, root := range h.roots {
-		rel, ok := root.match(assetPath)
-		if !ok {
-			continue
-		}
-		if !root.assetExists(rel) {
-			continue
-		}
-
-		fullPath := assetPath
-		if root.prefix != "" {
-			fullPath = path.Join(root.prefix, rel)
-		}
-		addCacheHeaders(w, fullPath, root, rel)
-		root.serve(w, r, rel)
-		return
-	}
-
-	h.next.ServeHTTP(w, r)
-}
-
 func isHashedAsset(assetPath string) bool {
 	base := filepath.Base(assetPath)
 	name := strings.TrimSuffix(base, filepath.Ext(base))
@@ -1461,20 +1321,16 @@ func ensureLeadingSlash(p string) string {
 	return "/" + p
 }
 
-func resolvePrebuiltFiles(filesystem fs.FS, p Page) (PrebuiltFiles, error) {
-	if p.Files.Server != "" || p.Files.Client != "" || p.Files.CSS != "" {
-		return p.Files, nil
-	}
-
-	dist := p.DistDir
+func resolvePrebuiltFiles(filesystem fs.FS, component string, distDir string, name string) (PrebuiltFiles, error) {
+	dist := distDir
 	if dist == "" {
 		dist = DefaultDistDir
 	}
 
-	base := p.Name
+	base := name
 	if base == "" {
-		component := filepath.Base(p.Component)
-		base = strings.TrimSuffix(component, filepath.Ext(component))
+		componentBase := filepath.Base(component)
+		base = strings.TrimSuffix(componentBase, filepath.Ext(componentBase))
 	}
 
 	if filesystem != nil {
