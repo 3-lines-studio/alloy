@@ -9,8 +9,8 @@ import (
 	"github.com/3-lines-studio/alloy/cmd/sample/loader"
 )
 
-//go:embed app/dist/alloy/* public/*
-var embeddedDist embed.FS
+//go:embed dist/* public/*
+var dist embed.FS
 
 func main() {
 	pages := []alloy.Page{
@@ -35,7 +35,7 @@ func main() {
 		},
 	}
 
-	handler, err := alloy.Handler(embeddedDist, pages)
+	handler, err := alloy.Handler(dist, pages)
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -16,24 +16,29 @@ go test ./...
 ```
 
 **Development mode:**
-Set `ALLOY_DEV=1` to rebuild on each request with live reload.
-
-**Run sample app:**
 ```sh
+# Terminal 1: Watch and rebuild assets
 cd cmd/sample
-ALLOY_DEV=1 go run main.go
+alloy dev  # Auto-discovers app/pages/*.tsx
+
+# Terminal 2: Run server with hot reload
+air
 ```
 
 **Run documentation site:**
 ```sh
+# Terminal 1: Watch assets
 cd docs
-ALLOY_DEV=1 go run main.go
+alloy dev
+
+# Terminal 2: Run server
+air
 ```
 
 **Build for production:**
 ```sh
-alloy                                    # Auto-discovers app/pages/*.tsx
-alloy -pages app/pages -out app/dist/alloy  # Explicit paths
+alloy build                                    # Auto-discovers app/pages/*.tsx
+alloy build -pages app/pages -out app/dist/alloy  # Explicit paths
 ```
 
 ## Core Architecture
@@ -47,11 +52,12 @@ alloy -pages app/pages -out app/dist/alloy  # Explicit paths
 - Props are serialized as JSON and embedded in HTML for client hydration
 
 **Key functions in `render.go`:**
-- `RenderTSXFileWithHydration()`: Main rendering entry point
+- `RenderTSXFileWithHydration()`: Main rendering entry point (requires prebuilt bundles)
 - `executeSSR()`: Runs JavaScript in QuickJS with timeout support
-- `bundleTSXFile()`: Creates server bundle using esbuild
-- `bundleClientJS()`: Creates client hydration bundle
-- `buildTailwindCSS()`: Compiles CSS with Tailwind
+- `BuildServerBundle()`: Creates server bundle using esbuild (CLI use)
+- `BuildClientBundles()`: Creates client bundles with code splitting (CLI use)
+- `RunTailwind()`: Compiles CSS with Tailwind (CLI use)
+- `SaveCSS()`: Writes compiled CSS to disk (CLI use)
 
 ### Runtime Pool Pattern
 
@@ -60,23 +66,23 @@ alloy -pages app/pages -out app/dist/alloy  # Explicit paths
 - Interrupt handlers for timeout enforcement
 - Runtimes are disposed after each use (ephemeral pool)
 
-Implementation in `quickjs.go`.
+### Build and Asset Strategy
 
-### Bundle Caching Strategy
-
-**Development mode (`ALLOY_DEV=1`):**
-- File-stamp based cache invalidation (tracks modification time + size)
-- Tracks all dependencies for accurate invalidation
-- Tailwind CSS watcher for fast rebuilds
-- Live reload via SSE at `/__live`
-- Dev CSS cached in `.alloy-cache/`
+**Development mode:**
+- `alloy dev` runs native esbuild and tailwind watchers
+- Watchers rebuild on file changes and write to disk
+- Assets written without content hashes (e.g., `home-server.js`, `home-client.js`)
+- Manifest.json updated on each rebuild
+- Server reads bundles from disk via `RegisterPrebuiltBundleFromFS()`
+- Air watches Go files and restarts server on changes
 
 **Production mode:**
-- Prebuilt bundles registered via `RegisterPrebuiltBundle()`
+- `alloy build` creates optimized bundles with content hashes
 - Assets embedded in Go binary using `//go:embed`
-- Immutable caching with content hashes in filenames
+- Bundles registered via `RegisterPrebuiltBundleFromFS()` at startup
+- Immutable caching with 1-year cache headers
 
-Implementation in `bundle.go`.
+**Key insight:** Both dev and prod use the same code path - bundles are always read from the cache after being registered. The only difference is dev reads from disk filesystem while prod reads from embedded filesystem.
 
 ### Routing System
 
@@ -151,7 +157,7 @@ myapp/
 
 - Must export default function
 - Props typed as function parameters
-- Each page needs sibling `app.css` in development mode
+- Each page directory needs an `app.css` file for Tailwind
 
 ### RootID Convention
 
@@ -177,15 +183,14 @@ map[string]any{
 
 ### Production Workflow
 
-1. Run `alloy` CLI to prebuild bundles
+1. Run `alloy build` to create optimized bundles with content hashes
 2. Embed assets with `//go:embed app/dist/alloy/* public/*`
-3. Call `alloy.Handler(dist, pages)` to create HTTP handler
-4. Deploy single binary
+3. Set `PRODUCTION=1` environment variable
+4. Server detects production mode and uses embedded filesystem
+5. Deploy single binary
 
 ## Key Files
 
-- `render.go`: Main SSR rendering logic, bundling, QuickJS execution
+- `render.go`: SSR rendering, QuickJS execution, bundle registration
 - `handler.go`: HTTP handler, routing, asset serving
-- `bundle.go`: esbuild integration, cache management
-- `quickjs.go`: QuickJS runtime pool and execution
-- `cmd/alloy/`: CLI tool for building bundles
+- `cmd/alloy/main.go`: CLI tool with `build` and `dev` commands

@@ -152,29 +152,30 @@ func TestRegisterPagesSupportsRouteParams(t *testing.T) {
 }
 
 func TestRenderTSXFileWithHydrationRequiresCSS(t *testing.T) {
-	dir, err := os.MkdirTemp(".", "alloy-test-no-css-")
-	if err != nil {
-		t.Fatalf("create temp dir: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = os.RemoveAll(dir)
-	})
+	resetBundleCache()
+	t.Cleanup(resetBundleCache)
 
+	dir := t.TempDir()
 	componentPath := filepath.Join(dir, "component.tsx")
-	component := `
-export default function Page() {
-	return <div>no css file</div>;
-}
-`
-	if err := os.WriteFile(componentPath, []byte(component), 0644); err != nil {
-		t.Fatalf("write component: %v", err)
+
+	serverBundle := `var __Component = { default: function() { return "<div>test</div>"; } };`
+	if err := os.WriteFile(filepath.Join(dir, "server.js"), []byte(serverBundle), 0644); err != nil {
+		t.Fatalf("write server bundle: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "client.js"), []byte("console.log('test')"), 0644); err != nil {
+		t.Fatalf("write client bundle: %v", err)
 	}
 
-	_, err = RenderTSXFileWithHydration(componentPath, nil, "root")
+	files := PrebuiltFiles{
+		Server: "server.js",
+		Client: "client.js",
+		CSS:    "",
+	}
+	err := RegisterPrebuiltBundleFromFS(componentPath, "root", os.DirFS(dir), files)
 	if err == nil {
 		t.Fatalf("expected error when css file is missing")
 	}
-	if !strings.Contains(err.Error(), "missing app.css") {
+	if !strings.Contains(err.Error(), "prebuilt file paths required") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -294,7 +295,7 @@ func TestWithPublicAssetsServesDistFiles(t *testing.T) {
 	sampleDir := filepath.Join("cmd", "sample")
 	filesystem := os.DirFS(sampleDir)
 
-	data, err := fs.ReadFile(filesystem, path.Join("app", "dist", "alloy", "manifest.json"))
+	data, err := fs.ReadFile(filesystem, path.Join("dist", "manifest.json"))
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
@@ -308,7 +309,7 @@ func TestWithPublicAssetsServesDistFiles(t *testing.T) {
 		t.Fatalf("manifest missing client entry")
 	}
 
-	asset := path.Join("app/dist/alloy", entry.Client)
+	asset := path.Join("dist", entry.Client)
 	request := httptest.NewRequest(http.MethodGet, "/"+asset, nil)
 
 	handler := WithPublicAssets(http.NotFound, filesystem)
@@ -343,7 +344,6 @@ func TestRenderResultToHTMLWithAssets(t *testing.T) {
 		HTML:        "<div>ok</div>",
 		ClientPaths: []string{"/static/a.js", "/static/b.js"},
 		CSSPath:     "/styles/app.css",
-		SharedCSS:   "/styles/shared.css",
 		Props: map[string]any{
 			"title": "Docs",
 			"note":  "n",
@@ -360,10 +360,7 @@ func TestRenderResultToHTMLWithAssets(t *testing.T) {
 
 	html := result.ToHTML("app-root")
 
-	if !strings.Contains(html, `<link rel="stylesheet" href="/styles/shared.css" />`) {
-		t.Fatalf("missing shared css link: %s", html)
-	}
-	if !strings.Contains(html, `<link rel="stylesheet" href="/styles/app.css" />`) {
+	if !strings.Contains(html, `<link rel="stylesheet" href="/styles/app.css?v=`) {
 		t.Fatalf("missing css link: %s", html)
 	}
 	if !strings.Contains(html, `<script type="module" src="/static/a.js"></script>`) {
@@ -460,7 +457,6 @@ func TestRenderPrebuiltUsesCachedBundles(t *testing.T) {
 		Server:       filepath.Join("dist", "page-server.js"),
 		Client:       filepath.Join("dist", "page-client.js"),
 		CSS:          filepath.Join("dist", "page.css"),
-		SharedCSS:    filepath.Join("dist", "shared.css"),
 		ClientChunks: []string{filepath.Join("dist", "chunk-1.js")},
 	}
 
@@ -481,10 +477,6 @@ func TestRenderPrebuiltUsesCachedBundles(t *testing.T) {
 	if result.CSSPath != wantCSS {
 		t.Fatalf("css path: want %s, got %s", wantCSS, result.CSSPath)
 	}
-	wantShared := "/" + filepath.ToSlash(files.SharedCSS)
-	if result.SharedCSS != wantShared {
-		t.Fatalf("shared css: want %s, got %s", wantShared, result.SharedCSS)
-	}
 	if len(result.Props) == 0 || result.Props["msg"] != "hi" {
 		t.Fatalf("props not forwarded: %v", result.Props)
 	}
@@ -501,18 +493,9 @@ func TestSaveFilesAndWriteManifest(t *testing.T) {
 		t.Fatalf("server file missing: %v", err)
 	}
 
-	sharedPath, err := SaveSharedCSS("body{}", dir, "shared")
-	if err != nil {
-		t.Fatalf("save shared css: %v", err)
-	}
-	if _, err := os.Stat(sharedPath); err != nil {
-		t.Fatalf("shared css missing: %v", err)
-	}
-
 	files.Client = filepath.Join(dir, "home-client.js")
 	files.CSS = filepath.Join(dir, "home.css")
 	files.ClientChunks = []string{filepath.Join(dir, "chunk-a.js")}
-	files.SharedCSS = sharedPath
 
 	if err := os.WriteFile(files.Client, []byte("client"), 0644); err != nil {
 		t.Fatalf("write client: %v", err)
@@ -547,9 +530,6 @@ func TestSaveFilesAndWriteManifest(t *testing.T) {
 	}
 	if len(entry.Chunks) != 1 || entry.Chunks[0] != filepath.Base(files.ClientChunks[0]) {
 		t.Fatalf("manifest chunks wrong: %+v", entry.Chunks)
-	}
-	if entry.Shared == "" {
-		t.Fatalf("manifest shared css missing")
 	}
 }
 
@@ -626,7 +606,7 @@ func TestDefaultRootAndJoinPaths(t *testing.T) {
 
 func TestResolvePrebuiltFilesReadsManifest(t *testing.T) {
 	dir := t.TempDir()
-	distDir := filepath.Join(dir, "dist", "alloy")
+	distDir := filepath.Join(dir, "dist")
 	if err := os.MkdirAll(distDir, 0755); err != nil {
 		t.Fatalf("create dist dir: %v", err)
 	}
@@ -649,7 +629,7 @@ func TestResolvePrebuiltFilesReadsManifest(t *testing.T) {
 		Route:     "/",
 		Component: "pages/home.tsx",
 		Name:      "home",
-		DistDir:   "dist/alloy",
+		DistDir:   "dist",
 	}
 
 	files, err := resolvePrebuiltFiles(os.DirFS(dir), page)
@@ -657,18 +637,18 @@ func TestResolvePrebuiltFilesReadsManifest(t *testing.T) {
 		t.Fatalf("resolve files: %v", err)
 	}
 
-	wantServer := filepath.Join("dist/alloy", "home-aaaa1111-server.js")
+	wantServer := filepath.Join("dist", "home-aaaa1111-server.js")
 	if files.Server != wantServer {
 		t.Fatalf("server path: want %s, got %s", wantServer, files.Server)
 	}
-	wantClient := filepath.Join("dist/alloy", "home-bbbb2222-client.js")
+	wantClient := filepath.Join("dist", "home-bbbb2222-client.js")
 	if files.Client != wantClient {
 		t.Fatalf("client path: want %s, got %s", wantClient, files.Client)
 	}
-	if len(files.ClientChunks) != 1 || files.ClientChunks[0] != filepath.Join("dist/alloy", "chunk-123.js") {
+	if len(files.ClientChunks) != 1 || files.ClientChunks[0] != filepath.Join("dist", "chunk-123.js") {
 		t.Fatalf("client chunks: %v", files.ClientChunks)
 	}
-	wantCSS := filepath.Join("dist/alloy", "home-cccc3333.css")
+	wantCSS := filepath.Join("dist", "home-cccc3333.css")
 	if files.CSS != wantCSS {
 		t.Fatalf("css path: want %s, got %s", wantCSS, files.CSS)
 	}
@@ -710,29 +690,21 @@ export default function Page({ title }: { title: string }) {
 
 	b.Run("bundle_server", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			if _, _, err := bundleTSXFile(componentPath); err != nil {
+			if _, _, err := BuildServerBundle(componentPath); err != nil {
 				b.Fatalf("bundle server: %v", err)
-			}
-		}
-	})
-
-	b.Run("bundle_client", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			if _, _, err := bundleClientJS(componentPath, "root"); err != nil {
-				b.Fatalf("bundle client: %v", err)
 			}
 		}
 	})
 
 	b.Run("build_css", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			if _, _, err := buildTailwindCSS(componentPath); err != nil {
+			if _, err := RunTailwind(cssPath, filepath.Dir(cssPath)); err != nil {
 				b.Fatalf("build css: %v", err)
 			}
 		}
 	})
 
-	serverJS, _, err := bundleTSXFile(componentPath)
+	serverJS, _, err := BuildServerBundle(componentPath)
 	if err != nil {
 		b.Fatalf("prep server bundle: %v", err)
 	}
@@ -985,6 +957,257 @@ func TestMetaTagsArrayFormat(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBuildServerBundle(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get cwd: %v", err)
+	}
+	defer os.Chdir(cwd)
+
+	sampleDir := filepath.Join(cwd, "cmd", "sample")
+	if err := os.Chdir(sampleDir); err != nil {
+		t.Fatalf("chdir to sample: %v", err)
+	}
+
+	componentPath := filepath.Join(sampleDir, "app", "pages", "home.tsx")
+
+	js, deps, err := BuildServerBundle(componentPath)
+	if err != nil {
+		t.Fatalf("BuildServerBundle failed: %v", err)
+	}
+
+	if js == "" {
+		t.Error("expected non-empty JS output")
+	}
+	if !strings.Contains(js, "renderToString") {
+		t.Error("expected JS to contain renderToString")
+	}
+	if len(deps) == 0 {
+		t.Error("expected at least one dependency")
+	}
+
+	hasReact := false
+	for _, dep := range deps {
+		if strings.Contains(dep, "react") {
+			hasReact = true
+			break
+		}
+	}
+	if !hasReact {
+		t.Errorf("expected deps to contain react, got: %v", deps)
+	}
+}
+
+func TestBuildServerBundleNonExistent(t *testing.T) {
+	_, _, err := BuildServerBundle("/nonexistent/file.tsx")
+	if err == nil {
+		t.Fatal("expected error for non-existent file")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestBuildClientBundlesSingle(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get cwd: %v", err)
+	}
+	defer os.Chdir(cwd)
+
+	sampleDir := filepath.Join(cwd, "cmd", "sample")
+	if err := os.Chdir(sampleDir); err != nil {
+		t.Fatalf("chdir to sample: %v", err)
+	}
+
+	outDir := t.TempDir()
+	componentPath := filepath.Join(sampleDir, "app", "pages", "home.tsx")
+
+	entries := []ClientEntry{
+		{Name: "home", Component: componentPath, RootID: "home-root"},
+	}
+
+	assets, err := BuildClientBundles(entries, outDir)
+	if err != nil {
+		t.Fatalf("BuildClientBundles failed: %v", err)
+	}
+
+	if len(assets) != 1 {
+		t.Fatalf("expected 1 asset, got %d", len(assets))
+	}
+
+	homeAsset, ok := assets["home"]
+	if !ok {
+		t.Fatal("expected 'home' key in assets map")
+	}
+
+	if homeAsset.Entry == "" {
+		t.Error("expected non-empty Entry field")
+	}
+
+	files, err := os.ReadDir(outDir)
+	if err != nil {
+		t.Fatalf("read out dir: %v", err)
+	}
+	if len(files) == 0 {
+		t.Error("expected at least one file written to disk")
+	}
+
+	foundEntry := false
+	for _, f := range files {
+		if strings.HasPrefix(f.Name(), "client-home-") && strings.HasSuffix(f.Name(), ".js") {
+			foundEntry = true
+			break
+		}
+	}
+	if !foundEntry {
+		t.Error("expected client-home-*.js file in output directory")
+	}
+}
+
+func TestBuildClientBundlesMultiple(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get cwd: %v", err)
+	}
+	defer os.Chdir(cwd)
+
+	sampleDir := filepath.Join(cwd, "cmd", "sample")
+	if err := os.Chdir(sampleDir); err != nil {
+		t.Fatalf("chdir to sample: %v", err)
+	}
+
+	outDir := t.TempDir()
+	homePath := filepath.Join(sampleDir, "app", "pages", "home.tsx")
+	aboutPath := filepath.Join(sampleDir, "app", "pages", "about.tsx")
+
+	entries := []ClientEntry{
+		{Name: "home", Component: homePath, RootID: "home-root"},
+		{Name: "about", Component: aboutPath, RootID: "about-root"},
+	}
+
+	assets, err := BuildClientBundles(entries, outDir)
+	if err != nil {
+		t.Fatalf("BuildClientBundles failed: %v", err)
+	}
+
+	if len(assets) != 2 {
+		t.Fatalf("expected 2 assets, got %d", len(assets))
+	}
+
+	if _, ok := assets["home"]; !ok {
+		t.Error("expected 'home' in assets map")
+	}
+	if _, ok := assets["about"]; !ok {
+		t.Error("expected 'about' in assets map")
+	}
+
+	if assets["home"].Entry == assets["about"].Entry {
+		t.Error("expected distinct entry files for different components")
+	}
+}
+
+func TestBuildClientBundlesEmptyEntries(t *testing.T) {
+	outDir := t.TempDir()
+
+	_, err := BuildClientBundles([]ClientEntry{}, outDir)
+	if err == nil {
+		t.Fatal("expected error for empty entries")
+	}
+	if !strings.Contains(err.Error(), "entries required") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestBuildClientBundlesMissingFields(t *testing.T) {
+	outDir := t.TempDir()
+
+	entries := []ClientEntry{
+		{Name: "", Component: "test.tsx", RootID: "root"},
+	}
+
+	_, err := BuildClientBundles(entries, outDir)
+	if err == nil {
+		t.Fatal("expected error for missing name")
+	}
+	if !strings.Contains(err.Error(), "name and component required") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestBuildClientBundlesInvalidOutDir(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get cwd: %v", err)
+	}
+
+	componentPath := filepath.Join(cwd, "cmd", "sample", "app", "pages", "home.tsx")
+	entries := []ClientEntry{
+		{Name: "home", Component: componentPath},
+	}
+
+	_, err = BuildClientBundles(entries, "")
+	if err == nil {
+		t.Fatal("expected error for empty outDir")
+	}
+	if !strings.Contains(err.Error(), "out dir required") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestRunTailwind(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get cwd: %v", err)
+	}
+
+	cssPath := filepath.Join(cwd, "cmd", "sample", "app", "app.css")
+
+	css, err := RunTailwind(cssPath, cwd)
+	if err != nil {
+		t.Fatalf("RunTailwind failed: %v", err)
+	}
+
+	if css == "" {
+		t.Error("expected non-empty CSS output")
+	}
+}
+
+func TestRunTailwindNonExistent(t *testing.T) {
+	_, err := RunTailwind("/nonexistent/app.css", ".")
+	if err == nil {
+		t.Fatal("expected error for non-existent CSS file")
+	}
+}
+
+func TestRunTailwindMinimal(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get cwd: %v", err)
+	}
+
+	sampleDir := filepath.Join(cwd, "cmd", "sample")
+	cssPath := filepath.Join(sampleDir, "minimal.css")
+
+	minimal := `body { margin: 0; }`
+	if err := os.WriteFile(cssPath, []byte(minimal), 0644); err != nil {
+		t.Fatalf("write minimal css: %v", err)
+	}
+	defer os.Remove(cssPath)
+
+	css, err := RunTailwind(cssPath, sampleDir)
+	if err != nil {
+		t.Fatalf("RunTailwind failed for minimal file: %v", err)
+	}
+
+	if css == "" {
+		t.Error("expected some CSS output")
+	}
+	if !strings.Contains(css, "margin") {
+		t.Error("expected CSS output to contain margin declaration")
 	}
 }
 

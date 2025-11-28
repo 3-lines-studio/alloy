@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"html"
 	"io/fs"
-	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -23,7 +22,12 @@ import (
 
 	"github.com/buke/quickjs-go"
 	"github.com/evanw/esbuild/pkg/api"
-	"golang.org/x/sync/errgroup"
+)
+
+const (
+	DefaultAppDir   = "app"
+	DefaultPagesDir = "app/pages"
+	DefaultDistDir  = "dist"
 )
 
 const (
@@ -40,7 +44,6 @@ type RenderResult struct {
 	ClientPath  string
 	ClientPaths []string
 	CSSPath     string
-	SharedCSS   string
 }
 
 // ClientAssets represents bundled client assets from BuildClientBundles
@@ -62,7 +65,6 @@ type PrebuiltFiles struct {
 	Client       string
 	ClientChunks []string
 	CSS          string
-	SharedCSS    string
 }
 
 // Page describes a routed component.
@@ -108,7 +110,6 @@ type manifestEntry struct {
 	Client string   `json:"client,omitempty"`
 	CSS    string   `json:"css"`
 	Chunks []string `json:"chunks,omitempty"`
-	Shared string   `json:"sharedCss,omitempty"`
 }
 
 // Internal handler types
@@ -344,7 +345,7 @@ func RegisterPrebuiltBundle(componentPath string, rootID string, serverJS string
 	bundleCache.Lock()
 	entry := bundleCache.entries[absPath]
 
-	if entry == nil || entryStale(entry) {
+	if entry == nil {
 		entry = &bundleCacheEntry{
 			serverJS:   serverJS,
 			clientByID: map[string]string{rootID: clientJS},
@@ -360,7 +361,6 @@ func RegisterPrebuiltBundle(componentPath string, rootID string, serverJS string
 	entry.css = css
 	entry.clientByID[rootID] = clientJS
 	entry.prebuilt = true
-	entry.deps = nil
 	bundleCache.Unlock()
 
 	return nil
@@ -402,17 +402,17 @@ func (r *RenderResult) ToHTML(rootID string) string {
 }
 
 func (r *RenderResult) buildCSSTag() string {
-	cssTag := ""
-	if r.SharedCSS != "" {
-		cssTag += fmt.Sprintf("\n\t<link rel=\"stylesheet\" href=\"%s\" />", r.SharedCSS)
-	}
 	switch {
 	case r.CSSPath != "":
-		cssTag += fmt.Sprintf("\n\t<link rel=\"stylesheet\" href=\"%s\" />", r.CSSPath)
+		cssURL := r.CSSPath
+		if !isHashedAsset(cssURL) {
+			cssURL = fmt.Sprintf("%s?v=%d", cssURL, time.Now().UnixNano())
+		}
+		return fmt.Sprintf("\n\t<link rel=\"stylesheet\" href=\"%s\" />", cssURL)
 	case r.CSS != "":
-		cssTag += fmt.Sprintf("\n\t<style>%s</style>", r.CSS)
+		return fmt.Sprintf("\n\t<style>%s</style>", r.CSS)
 	}
-	return cssTag
+	return ""
 }
 
 func (r *RenderResult) buildScriptTag() string {
@@ -618,31 +618,9 @@ func RenderTSXFileWithHydrationWithContext(ctx context.Context, filePath string,
 		return nil, fmt.Errorf("component not found %s: %w", absPath, err)
 	}
 
-	dir := filepath.Dir(absPath)
-	cssPath := filepath.Join(dir, "app.css")
-	if _, err := os.Stat(cssPath); err != nil {
-		return nil, fmt.Errorf("missing app.css at %s: %w", cssPath, err)
-	}
-
 	serverJS, clientJS, css := readBundlesFromCache(absPath, rootID)
 	if serverJS == "" || clientJS == "" || css == "" {
-		if !isDevMode() {
-			return nil, fmt.Errorf("component %s (rootID=%s) not registered; call RegisterPrebuiltBundle in production", absPath, rootID)
-		}
-
-		var deps []string
-		var buildErr error
-		serverJS, clientJS, css, deps, buildErr = buildAll(absPath, rootID)
-		if buildErr != nil {
-			return nil, buildErr
-		}
-
-		stamps, stampErr := captureFileStamps(deps)
-		if stampErr != nil {
-			return nil, fmt.Errorf("capture deps: %w", stampErr)
-		}
-
-		storeBundles(absPath, rootID, serverJS, clientJS, css, stamps)
+		return nil, fmt.Errorf("component %s (rootID=%s) not registered; run 'alloy dev' or 'alloy build' first", absPath, rootID)
 	}
 
 	html, err := executeSSR(ctx, serverJS, props)
@@ -690,7 +668,6 @@ func RenderPrebuiltWithContext(ctx context.Context, filePath string, props map[s
 		HTML:        html,
 		ClientPaths: paths,
 		CSSPath:     ensureLeadingSlash(filepath.ToSlash(files.CSS)),
-		SharedCSS:   ensureLeadingSlash(filepath.ToSlash(files.SharedCSS)),
 		Props:       props,
 	}, nil
 }
@@ -705,12 +682,61 @@ func BuildServerBundle(filePath string) (string, []string, error) {
 		return "", nil, fmt.Errorf("component not found %s: %w", absPath, err)
 	}
 
-	serverJS, deps, err := bundleTSXFile(absPath)
+	tmpDir, err := os.MkdirTemp("", "alloy-")
 	if err != nil {
-		return "", nil, fmt.Errorf("bundle server %s: %w", absPath, err)
+		return "", nil, err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	entryCode := fmt.Sprintf(`
+import { renderToString } from 'react-dom/server.edge';
+import Component from '%s';
+
+export default function render(props: any) {
+	return renderToString(<Component {...props} />);
+}
+	`, absPath)
+
+	entryPath := filepath.Join(tmpDir, "entry.tsx")
+	if err := os.WriteFile(entryPath, []byte(entryCode), 0644); err != nil {
+		return "", nil, err
 	}
 
-	return serverJS, deps, nil
+	cwd, _ := os.Getwd()
+
+	result := api.Build(api.BuildOptions{
+		EntryPoints:      []string{entryPath},
+		Bundle:           true,
+		Write:            false,
+		Metafile:         true,
+		Format:           api.FormatIIFE,
+		GlobalName:       "__Component",
+		MinifyWhitespace: true,
+		MinifySyntax:     true,
+		Target:           api.ES2020,
+		JSX:              api.JSXAutomatic,
+		JSXImportSource:  "react",
+		NodePaths:        []string{filepath.Join(cwd, "node_modules")},
+		Platform:         api.PlatformBrowser,
+		MainFields:       []string{"browser", "module", "main"},
+	})
+
+	if len(result.Errors) > 0 {
+		return "", nil, fmt.Errorf("esbuild server bundle %s: %s", absPath, result.Errors[0].Text)
+	}
+
+	if len(result.OutputFiles) == 0 {
+		return "", nil, fmt.Errorf("esbuild produced no server bundle for %s", absPath)
+	}
+
+	deps, err := bundleInputs(result.Metafile)
+	if err != nil {
+		return "", nil, fmt.Errorf("parse server metafile %s: %w", absPath, err)
+	}
+
+	deps = filterOutPath(deps, entryPath)
+
+	return string(result.OutputFiles[0].Contents), deps, nil
 }
 
 func writeManifestEntry(dir string, name string, files *PrebuiltFiles) error {
@@ -732,7 +758,6 @@ func writeManifestEntry(dir string, name string, files *PrebuiltFiles) error {
 		Client: filepath.Base(files.Client),
 		CSS:    filepath.Base(files.CSS),
 		Chunks: baseNames(files.ClientChunks),
-		Shared: filepath.Base(files.SharedCSS),
 	}
 
 	data, err := json.MarshalIndent(manifest, "", "  ")
@@ -778,8 +803,8 @@ func SaveServerBundle(serverJS string, dir string, name string) (*PrebuiltFiles,
 	return files, nil
 }
 
-// SaveSharedCSS writes a shared CSS bundle to disk.
-func SaveSharedCSS(css string, dir string, name string) (string, error) {
+// SaveCSS writes a CSS bundle to disk.
+func SaveCSS(css string, dir string, name string) (string, error) {
 	if css == "" {
 		return "", fmt.Errorf("css required")
 	}
@@ -951,16 +976,14 @@ func RegisterPages(mux *http.ServeMux, filesystem fs.FS, pages []Page) error {
 		}
 
 		var prebuiltFiles PrebuiltFiles
-		if !isDevMode() {
-			files, err := resolvePrebuiltFiles(filesystem, p)
-			if err != nil {
-				return err
-			}
-			if err := RegisterPrebuiltBundleFromFS(p.Component, rootID, filesystem, files); err != nil {
-				return err
-			}
-			prebuiltFiles = files
+		files, err := resolvePrebuiltFiles(filesystem, p)
+		if err != nil {
+			return err
 		}
+		if err := RegisterPrebuiltBundleFromFS(p.Component, rootID, filesystem, files); err != nil {
+			return err
+		}
+		prebuiltFiles = files
 
 		segments, err := parseRoutePattern(p.Route)
 		if err != nil {
@@ -1232,8 +1255,8 @@ if (rootEl) {
 		Target:              api.ES2020,
 		EntryNames:          "client-[name]-[hash]",
 		ChunkNames:          "chunk-[hash]",
-		MinifyWhitespace:    !isDevMode(),
-		MinifySyntax:        !isDevMode(),
+		MinifyWhitespace:    true,
+		MinifySyntax:        true,
 		NodePaths:           []string{filepath.Join(cwd, "node_modules")},
 	})
 
@@ -1342,17 +1365,9 @@ func collectAssetRoots(filesystem fs.FS) []assetRoot {
 		})
 	}
 
-	if distFS, err := fs.Sub(filesystem, path.Join("app", "dist")); err == nil {
+	if distFS, err := fs.Sub(filesystem, DefaultDistDir); err == nil {
 		roots = append(roots, assetRoot{
-			prefix:     path.Join("app", "dist"),
-			fs:         distFS,
-			fileServer: http.FileServer(http.FS(distFS)),
-		})
-	}
-
-	if distFS, err := fs.Sub(filesystem, "dist"); err == nil {
-		roots = append(roots, assetRoot{
-			prefix:     "dist",
+			prefix:     DefaultDistDir,
 			fs:         distFS,
 			fileServer: http.FileServer(http.FS(distFS)),
 		})
@@ -1453,7 +1468,7 @@ func resolvePrebuiltFiles(filesystem fs.FS, p Page) (PrebuiltFiles, error) {
 
 	dist := p.DistDir
 	if dist == "" {
-		dist = defaultDistForComponent(p.Component)
+		dist = DefaultDistDir
 	}
 
 	base := p.Name
@@ -1475,24 +1490,6 @@ func resolvePrebuiltFiles(filesystem fs.FS, p Page) (PrebuiltFiles, error) {
 		Client: filepath.Join(dist, fmt.Sprintf("%s-client.js", base)),
 		CSS:    filepath.Join(dist, fmt.Sprintf("%s.css", base)),
 	}, nil
-}
-
-func defaultDistForComponent(component string) string {
-	if component == "" {
-		return "dist/alloy"
-	}
-
-	dir := filepath.Dir(component)
-	if dir == "" || dir == "." {
-		return "dist/alloy"
-	}
-
-	parent := filepath.Dir(dir)
-	if parent == "" || parent == "." {
-		return "dist/alloy"
-	}
-
-	return filepath.Join(parent, "dist/alloy")
 }
 
 func lookupManifest(filesystem fs.FS, dist string, base string) (PrebuiltFiles, bool, error) {
@@ -1525,17 +1522,11 @@ func lookupManifest(filesystem fs.FS, dist string, base string) (PrebuiltFiles, 
 		entry.Chunks = entry.Chunks[1:]
 	}
 
-	shared := ""
-	if entry.Shared != "" {
-		shared = path.Join(dist, entry.Shared)
-	}
-
 	return PrebuiltFiles{
 		Server:       path.Join(dist, entry.Server),
 		Client:       path.Join(dist, client),
 		ClientChunks: joinPaths(dist, entry.Chunks),
 		CSS:          path.Join(dist, entry.CSS),
-		SharedCSS:    shared,
 	}, true, nil
 }
 
@@ -1559,233 +1550,7 @@ func defaultRootID(componentPath string) string {
 	return base + "-root"
 }
 
-func isDevMode() bool {
-	return os.Getenv("ALLOY_DEV") != ""
-}
-
-func buildAll(componentPath string, rootID string) (string, string, string, []string, error) {
-	var serverJS, clientJS, css string
-	var serverDeps, clientDeps, cssDeps []string
-
-	var g errgroup.Group
-
-	g.Go(func() error {
-		b, deps, err := bundleTSXFile(componentPath)
-		if err != nil {
-			return fmt.Errorf("bundle server %s: %w", componentPath, err)
-		}
-		serverJS = b
-		serverDeps = deps
-		return nil
-	})
-
-	g.Go(func() error {
-		b, deps, err := bundleClientJS(componentPath, rootID)
-		if err != nil {
-			return fmt.Errorf("bundle client %s: %w", componentPath, err)
-		}
-		clientJS = b
-		clientDeps = deps
-		return nil
-	})
-
-	g.Go(func() error {
-		out, deps, err := buildTailwindCSS(componentPath)
-		if err != nil {
-			return fmt.Errorf("build css for %s: %w", componentPath, err)
-		}
-		css = out
-		cssDeps = deps
-		return nil
-	})
-
-	if err := g.Wait(); err != nil {
-		return "", "", "", nil, err
-	}
-
-	deps := mergePaths(serverDeps, clientDeps, cssDeps)
-	return serverJS, clientJS, css, deps, nil
-}
-
-func sha1String(s string) []byte {
-	h := sha1.New()
-	_, _ = h.Write([]byte(s))
-	return h.Sum(nil)
-}
-
-// bundleTSXFile builds from a file path, supporting relative imports
-func bundleTSXFile(componentPath string) (string, []string, error) {
-	absPath, err := filepath.Abs(componentPath)
-	if err != nil {
-		return "", nil, err
-	}
-
-	tmpDir, err := os.MkdirTemp("", "alloy-")
-	if err != nil {
-		return "", nil, err
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Write entry that wraps the component file with renderToString
-	entryCode := fmt.Sprintf(`
-import { renderToString } from 'react-dom/server.edge';
-import Component from '%s';
-
-export default function render(props: any) {
-	return renderToString(<Component {...props} />);
-}
-	`, absPath)
-
-	entryPath := filepath.Join(tmpDir, "entry.tsx")
-	if err := os.WriteFile(entryPath, []byte(entryCode), 0644); err != nil {
-		return "", nil, err
-	}
-
-	cwd, _ := os.Getwd()
-	minify := !isDevMode()
-
-	result := api.Build(api.BuildOptions{
-		EntryPoints:      []string{entryPath},
-		Bundle:           true,
-		Write:            false,
-		Metafile:         true,
-		Format:           api.FormatIIFE,
-		GlobalName:       "__Component",
-		MinifyWhitespace: minify,
-		MinifySyntax:     minify,
-		Target:           api.ES2020,
-		JSX:              api.JSXAutomatic,
-		JSXImportSource:  "react",
-		NodePaths:        []string{filepath.Join(cwd, "node_modules")},
-		Platform:         api.PlatformBrowser,
-		MainFields:       []string{"browser", "module", "main"},
-	})
-
-	if len(result.Errors) > 0 {
-		return "", nil, fmt.Errorf("esbuild server bundle %s: %s", absPath, result.Errors[0].Text)
-	}
-
-	if len(result.OutputFiles) == 0 {
-		return "", nil, fmt.Errorf("esbuild produced no server bundle for %s", absPath)
-	}
-
-	deps, err := bundleInputs(result.Metafile)
-	if err != nil {
-		return "", nil, fmt.Errorf("parse server metafile %s: %w", absPath, err)
-	}
-
-	deps = filterOutPath(deps, entryPath)
-
-	return string(result.OutputFiles[0].Contents), deps, nil
-}
-
-// bundleClientJS creates browser bundle for hydration
-func bundleClientJS(componentPath string, rootID string) (string, []string, error) {
-	absPath, err := filepath.Abs(componentPath)
-	if err != nil {
-		return "", nil, err
-	}
-
-	tmpDir, err := os.MkdirTemp("", "alloy-")
-	if err != nil {
-		return "", nil, err
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Client entry that hydrates the component
-	entryCode := fmt.Sprintf(`
-import { hydrateRoot } from 'react-dom/client';
-import Component from '%s';
-
-const propsEl = document.getElementById('%s-props');
-const props = propsEl ? JSON.parse(propsEl.textContent) : {};
-const rootEl = document.getElementById('%s');
-
-if (rootEl) {
-	hydrateRoot(rootEl, <Component {...props} />);
-}
-	`, absPath, rootID, rootID)
-
-	entryPath := filepath.Join(tmpDir, "client.tsx")
-	if err := os.WriteFile(entryPath, []byte(entryCode), 0644); err != nil {
-		return "", nil, err
-	}
-
-	cwd, _ := os.Getwd()
-	minify := !isDevMode()
-
-	result := api.Build(api.BuildOptions{
-		EntryPoints:      []string{entryPath},
-		Bundle:           true,
-		Write:            false,
-		Metafile:         true,
-		Format:           api.FormatESModule,
-		MinifyWhitespace: minify,
-		MinifySyntax:     minify,
-		Target:           api.ES2020,
-		JSX:              api.JSXAutomatic,
-		JSXImportSource:  "react",
-		NodePaths:        []string{filepath.Join(cwd, "node_modules")},
-		Platform:         api.PlatformBrowser,
-		MainFields:       []string{"browser", "module", "main"},
-	})
-
-	if len(result.Errors) > 0 {
-		return "", nil, fmt.Errorf("esbuild client bundle %s: %s", absPath, result.Errors[0].Text)
-	}
-
-	if len(result.OutputFiles) == 0 {
-		return "", nil, fmt.Errorf("esbuild produced no client bundle for %s", absPath)
-	}
-
-	deps, err := bundleInputs(result.Metafile)
-	if err != nil {
-		return "", nil, fmt.Errorf("parse client metafile %s: %w", absPath, err)
-	}
-
-	deps = filterOutPath(deps, entryPath)
-	return string(result.OutputFiles[0].Contents), deps, nil
-}
-
-// buildTailwindCSS uses the Tailwind CLI to compile CSS for a component.
-func buildTailwindCSS(componentPath string) (string, []string, error) {
-	absPath, err := filepath.Abs(componentPath)
-	if err != nil {
-		return "", nil, err
-	}
-
-	dir := filepath.Dir(absPath)
-	cssPath := filepath.Join(dir, "app.css")
-	if _, err := os.Stat(cssPath); err != nil {
-		return "", nil, fmt.Errorf("missing app.css at %s: %w", cssPath, err)
-	}
-
-	cssDeps := []string{cssPath}
-
-	fmt.Fprintf(os.Stderr, "[css] building with tailwindcss\n")
-	cssString, err := runTailwind(cssPath, dir)
-	if err != nil {
-		return "", nil, err
-	}
-
-	return cssString, cssDeps, nil
-}
-
-// BuildSharedCSS builds a single CSS bundle from a base app.css and content globs.
-func BuildSharedCSS(cssPath string) (string, error) {
-	if cssPath == "" {
-		return "", fmt.Errorf("css path required")
-	}
-
-	root := findPackageRoot(filepath.Dir(cssPath))
-	return runTailwind(cssPath, root)
-}
-
-func runTailwind(cssPath string, root string) (string, error) {
-	if root == "" {
-		root = findPackageRoot(filepath.Dir(cssPath))
-	}
-
+func RunTailwind(cssPath string, root string) (string, error) {
 	outputFile, err := os.CreateTemp("", "alloy-tailwind-*.css")
 	if err != nil {
 		return "", fmt.Errorf("create temp css: %w", err)
@@ -1794,12 +1559,9 @@ func runTailwind(cssPath string, root string) (string, error) {
 	outputFile.Close()
 	defer os.Remove(outputPath)
 
-	args := []string{"-i", cssPath, "-o", outputPath}
-	if !isDevMode() {
-		args = append(args, "--minify")
-	}
+	args := []string{"-i", cssPath, "-o", outputPath, "--minify"}
 
-	cmd, err := tailwindCmd(root, args...)
+	cmd, err := tailwindCmd("./", args...)
 	if err != nil {
 		return "", err
 	}
@@ -1817,25 +1579,8 @@ func runTailwind(cssPath string, root string) (string, error) {
 	return string(css), nil
 }
 
-func findPackageRoot(startDir string) string {
-	dir := startDir
-
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
-			return dir
-		}
-
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return dir
-		}
-
-		dir = parent
-	}
-}
-
 func tailwindCmd(root string, args ...string) (*exec.Cmd, error) {
-	runner, baseArgs := resolveTailwindRunner(root)
+	runner, baseArgs := ResolveTailwindRunner(root)
 	if runner == "" {
 		return nil, fmt.Errorf("tailwind runner not found")
 	}
@@ -1845,7 +1590,7 @@ func tailwindCmd(root string, args ...string) (*exec.Cmd, error) {
 	return cmd, nil
 }
 
-func resolveTailwindRunner(root string) (string, []string) {
+func ResolveTailwindRunner(root string) (string, []string) {
 	switch {
 	case fileExists(filepath.Join(root, "pnpm-lock.yaml")):
 		return tailwindRunnerFor("pnpm")
@@ -1863,15 +1608,15 @@ func resolveTailwindRunner(root string) (string, []string) {
 func tailwindRunnerFor(name string) (string, []string) {
 	switch name {
 	case "pnpm":
-		return "pnpm", []string{"exec", "tailwindcss"}
+		return "pnpx", []string{"@tailwindcss/cli"}
 	case "npm", "npx":
-		return "npx", []string{"tailwindcss"}
+		return "npx", []string{"@tailwindcss/cli"}
 	case "yarn":
-		return "yarn", []string{"tailwindcss"}
+		return "yarn", []string{"@tailwindcss/cli"}
 	case "bun", "bunx":
-		return "bunx", []string{"tailwindcss"}
+		return "bunx", []string{"@tailwindcss/cli"}
 	default:
-		return name, []string{"tailwindcss"}
+		return name, []string{"@tailwindcss/cli"}
 	}
 }
 
@@ -1885,45 +1630,11 @@ func readBundlesFromCache(path string, rootID string) (string, string, string) {
 	entry := bundleCache.entries[path]
 	bundleCache.RUnlock()
 
-	if entry != nil && !entryStale(entry) {
+	if entry != nil {
 		return entry.serverJS, entry.clientByID[rootID], entry.css
 	}
 
 	return "", "", ""
-}
-
-func storeBundles(path string, rootID string, serverJS string, clientJS string, css string, deps map[string]fileStamp) {
-	bundleCache.Lock()
-	entry := bundleCache.entries[path]
-	if entry == nil || entryStale(entry) {
-		entry = &bundleCacheEntry{
-			serverJS:   serverJS,
-			clientByID: map[string]string{rootID: clientJS},
-			css:        css,
-			deps:       deps,
-			prebuilt:   false,
-		}
-		bundleCache.entries[path] = entry
-		bundleCache.Unlock()
-		return
-	}
-
-	entry.clientByID[rootID] = clientJS
-	entry.deps = deps
-	entry.prebuilt = false
-	clientByID := make(map[string]string, len(entry.clientByID))
-	maps.Copy(clientByID, entry.clientByID)
-	bundleCache.Unlock()
-}
-
-func entryStale(entry *bundleCacheEntry) bool {
-	if entry == nil {
-		return true
-	}
-	if entry.prebuilt {
-		return false
-	}
-	return cacheStale(entry.deps)
 }
 
 // executeSSR runs the JS code in QuickJS using the runtime pool.
@@ -2014,53 +1725,6 @@ func bundleInputs(meta string) ([]string, error) {
 		inputs = append(inputs, abs)
 	}
 	return inputs, nil
-}
-
-func mergePaths(groups ...[]string) []string {
-	seen := make(map[string]struct{})
-	var merged []string
-
-	for _, group := range groups {
-		for _, path := range group {
-			if _, ok := seen[path]; ok {
-				continue
-			}
-			seen[path] = struct{}{}
-			merged = append(merged, path)
-		}
-	}
-
-	return merged
-}
-
-func captureFileStamps(paths []string) (map[string]fileStamp, error) {
-	stamps := make(map[string]fileStamp, len(paths))
-
-	for _, path := range paths {
-		info, err := os.Stat(path)
-		if err != nil {
-			return nil, err
-		}
-		stamps[path] = fileStamp{
-			ModTime: info.ModTime(),
-			Size:    info.Size(),
-		}
-	}
-
-	return stamps, nil
-}
-
-func cacheStale(stamps map[string]fileStamp) bool {
-	if len(stamps) == 0 {
-		return true
-	}
-	for path, stamp := range stamps {
-		info, err := os.Stat(path)
-		if err != nil || !info.ModTime().Equal(stamp.ModTime) || info.Size() != stamp.Size {
-			return true
-		}
-	}
-	return false
 }
 
 func filterOutPath(paths []string, skip string) []string {
