@@ -347,12 +347,13 @@ func TestRenderResultToHTMLWithAssets(t *testing.T) {
 		Props: map[string]any{
 			"title": "Docs",
 			"note":  "n",
-			"meta": map[string]any{
-				"title":       "Docs page",
-				"description": "Docs description",
-				"url":         "https://example.com/docs",
-				"image":       "https://cdn.example.com/hero.png",
-				"ogType":      "product",
+			"meta": []map[string]any{
+				{"title": "Docs page"},
+				{"name": "description", "content": "Docs description"},
+				{"tagName": "link", "rel": "canonical", "href": "https://example.com/docs"},
+				{"property": "og:url", "content": "https://example.com/docs"},
+				{"property": "og:image", "content": "https://cdn.example.com/hero.png"},
+				{"property": "og:type", "content": "product"},
 			},
 		},
 	}
@@ -380,7 +381,7 @@ func TestRenderResultToHTMLWithAssets(t *testing.T) {
 	if !strings.Contains(html, `<meta property="og:image" content="https://cdn.example.com/hero.png">`) {
 		t.Fatalf("missing og image: %s", html)
 	}
-	if !strings.Contains(html, `<link rel="canonical" href="https://example.com/docs">`) {
+	if !strings.Contains(html, `<link href="https://example.com/docs" rel="canonical">`) {
 		t.Fatalf("missing canonical: %s", html)
 	}
 	if !strings.Contains(html, `<meta property="og:type" content="product">`) {
@@ -812,6 +813,178 @@ func BenchmarkPagesHandlerPrebuilt(b *testing.B) {
 		if rr.Code != http.StatusOK {
 			b.Fatalf("status: want 200, got %d", rr.Code)
 		}
+	}
+}
+
+func TestMetaTagsArrayFormat(t *testing.T) {
+	tests := []struct {
+		name        string
+		props       map[string]any
+		contains    []string
+		notContains []string
+	}{
+		{
+			name: "basic meta array",
+			props: map[string]any{
+				"meta": []map[string]any{
+					{"title": "Test Page"},
+					{"name": "description", "content": "Test description"},
+				},
+			},
+			contains: []string{
+				"<title>Test Page</title>",
+				`<meta name="description" content="Test description">`,
+			},
+		},
+		{
+			name: "open graph tags",
+			props: map[string]any{
+				"meta": []map[string]any{
+					{"property": "og:title", "content": "OG Title"},
+					{"property": "og:type", "content": "website"},
+				},
+			},
+			contains: []string{
+				`<meta property="og:title" content="OG Title">`,
+				`<meta property="og:type" content="website">`,
+			},
+		},
+		{
+			name: "link tags",
+			props: map[string]any{
+				"meta": []map[string]any{
+					{"tagName": "link", "rel": "canonical", "href": "https://example.com/page"},
+				},
+			},
+			contains: []string{
+				`<link href="https://example.com/page" rel="canonical">`,
+			},
+		},
+		{
+			name: "html escaping",
+			props: map[string]any{
+				"meta": []map[string]any{
+					{"title": `Test "quoted" <tag>`},
+					{"name": "description", "content": `Test & "special" <chars>`},
+				},
+			},
+			contains: []string{
+				"<title>Test &#34;quoted&#34; &lt;tag&gt;</title>",
+				`content="Test &amp; &#34;special&#34; &lt;chars&gt;"`,
+			},
+			notContains: []string{
+				`<tag>`,
+			},
+		},
+		{
+			name: "empty meta array",
+			props: map[string]any{
+				"meta": []map[string]any{},
+			},
+			contains: []string{
+				"<title>Page</title>",
+				`<meta name="viewport"`,
+			},
+		},
+		{
+			name: "invalid tags skipped",
+			props: map[string]any{
+				"meta": []map[string]any{
+					{"name": "valid", "content": "Valid tag"},
+					{"name": "invalid"},
+					{"content": "orphan"},
+				},
+			},
+			contains: []string{
+				`<meta name="valid" content="Valid tag">`,
+			},
+			notContains: []string{
+				`name="invalid"`,
+				`content="orphan"`,
+			},
+		},
+		{
+			name: "robots and keywords",
+			props: map[string]any{
+				"meta": []map[string]any{
+					{"name": "robots", "content": "index, follow"},
+					{"name": "keywords", "content": "go, react, ssr"},
+				},
+			},
+			contains: []string{
+				`<meta name="robots" content="index, follow">`,
+				`<meta name="keywords" content="go, react, ssr">`,
+			},
+		},
+		{
+			name: "twitter card",
+			props: map[string]any{
+				"meta": []map[string]any{
+					{"name": "twitter:card", "content": "summary_large_image"},
+					{"name": "twitter:site", "content": "@example"},
+				},
+			},
+			contains: []string{
+				`<meta name="twitter:card" content="summary_large_image">`,
+				`<meta name="twitter:site" content="@example">`,
+			},
+		},
+		{
+			name: "complete example with all tag types",
+			props: map[string]any{
+				"meta": []map[string]any{
+					{"title": "Complete Page"},
+					{"name": "description", "content": "Page description"},
+					{"property": "og:title", "content": "OG Title"},
+					{"property": "og:description", "content": "OG Desc"},
+					{"property": "og:url", "content": "https://example.com"},
+					{"property": "og:image", "content": "https://example.com/og.png"},
+					{"property": "og:type", "content": "website"},
+					{"property": "og:locale", "content": "es_AR"},
+					{"name": "twitter:card", "content": "summary_large_image"},
+					{"name": "robots", "content": "index, follow"},
+					{"tagName": "link", "rel": "canonical", "href": "https://example.com"},
+				},
+			},
+			contains: []string{
+				"<title>Complete Page</title>",
+				`<meta name="description" content="Page description">`,
+				`<meta property="og:title" content="OG Title">`,
+				`<meta property="og:locale" content="es_AR">`,
+				`<meta name="twitter:card" content="summary_large_image">`,
+				`<meta name="robots" content="index, follow">`,
+				`<link href="https://example.com" rel="canonical">`,
+			},
+		},
+		{
+			name: "missing meta prop uses defaults",
+			props: map[string]any{
+				"title": "Fallback Title",
+			},
+			contains: []string{
+				"<title>Fallback Title</title>",
+				`<meta name="viewport"`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tags := metaTagsFromProps(tt.props)
+			html := buildHead(tags)
+
+			for _, expected := range tt.contains {
+				if !strings.Contains(html, expected) {
+					t.Errorf("expected HTML to contain %q, got:\n%s", expected, html)
+				}
+			}
+
+			for _, unexpected := range tt.notContains {
+				if strings.Contains(html, unexpected) {
+					t.Errorf("expected HTML NOT to contain %q, got:\n%s", unexpected, html)
+				}
+			}
+		})
 	}
 }
 

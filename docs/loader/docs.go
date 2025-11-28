@@ -16,9 +16,12 @@ import (
 
 func Home(r *http.Request) map[string]any {
 	return map[string]any{
-		"meta": map[string]any{
-			"title":       "Alloy",
-			"description": "Go + React",
+		"meta": []map[string]any{
+			{"title": "Alloy"},
+			{"name": "description", "content": "Go + React"},
+			{"property": "og:title", "content": "Alloy"},
+			{"property": "og:description", "content": "Go + React"},
+			{"property": "og:type", "content": "website"},
 		},
 	}
 }

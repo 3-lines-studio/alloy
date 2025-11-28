@@ -14,6 +14,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -435,15 +436,8 @@ func (r *RenderResult) ToHTML(rootID string) string {
 
 	propsJSON, _ := json.Marshal(r.Props)
 
-	meta := metaFromProps(r.Props)
-	if meta.Title == "" {
-		meta.Title = "Page"
-	}
-	if meta.OGType == "" {
-		meta.OGType = "website"
-	}
-
-	head := buildHead(meta)
+	metaTags := metaTagsFromProps(r.Props)
+	head := buildHead(metaTags)
 	cssTag := ""
 	if r.SharedCSS != "" {
 		cssTag += fmt.Sprintf("\n\t<link rel=\"stylesheet\" href=\"%s\" />", r.SharedCSS)
@@ -488,83 +482,204 @@ func (r *RenderResult) ToHTML(rootID string) string {
 </html>`, head, cssTag, rootID, r.HTML, rootID, string(propsJSON), scriptTag, liveReload)
 }
 
-type pageMeta struct {
-	Title       string
-	Description string
-	URL         string
-	Canonical   string
-	Image       string
-	OGType      string
+type metaTag struct {
+	TagName  string
+	Name     string
+	Property string
+	Content  string
+	Rel      string
+	Href     string
+	Title    string
 }
 
-func buildHead(meta pageMeta) string {
+func buildHead(tags []metaTag) string {
 	var b strings.Builder
+
 	b.WriteString("\t<meta charset=\"UTF-8\">")
-	b.WriteString("\n\t<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">")
-	b.WriteString(fmt.Sprintf("\n\t<title>%s</title>", html.EscapeString(meta.Title)))
 
-	if meta.Description != "" {
-		escaped := html.EscapeString(meta.Description)
-		fmt.Fprintf(&b, "\n\t<meta name=\"description\" content=\"%s\">", escaped)
-		fmt.Fprintf(&b, "\n\t<meta property=\"og:description\" content=\"%s\">", escaped)
+	hasViewport := false
+	hasTitle := false
+
+	for _, tag := range tags {
+		if tag.Title != "" {
+			if !hasTitle {
+				escaped := html.EscapeString(tag.Title)
+				fmt.Fprintf(&b, "\n\t<title>%s</title>", escaped)
+				hasTitle = true
+			}
+			continue
+		}
+
+		if tag.Name == "viewport" {
+			hasViewport = true
+		}
+
+		tagHTML := buildMetaTagHTML(tag)
+		if tagHTML != "" {
+			fmt.Fprintf(&b, "\n\t%s", tagHTML)
+		}
 	}
 
-	fmt.Fprintf(&b, "\n\t<meta property=\"og:title\" content=\"%s\">", html.EscapeString(meta.Title))
-
-	url := meta.URL
-	if url == "" {
-		url = meta.Canonical
-	}
-	if url != "" {
-		escaped := html.EscapeString(url)
-		fmt.Fprintf(&b, "\n\t<link rel=\"canonical\" href=\"%s\">", escaped)
-		fmt.Fprintf(&b, "\n\t<meta property=\"og:url\" content=\"%s\">", escaped)
+	if !hasViewport {
+		b.WriteString("\n\t<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">")
 	}
 
-	if meta.Image != "" {
-		fmt.Fprintf(&b, "\n\t<meta property=\"og:image\" content=\"%s\">", html.EscapeString(meta.Image))
+	if !hasTitle {
+		b.WriteString("\n\t<title>Page</title>")
 	}
-
-	fmt.Fprintf(&b, "\n\t<meta property=\"og:type\" content=\"%s\">", html.EscapeString(meta.OGType))
 
 	return b.String()
 }
 
-func metaFromProps(props map[string]any) pageMeta {
-	meta := pageMeta{
-		Title:       stringProp(props, "title"),
-		Description: stringProp(props, "description"),
-		URL:         stringProp(props, "url"),
-		Canonical:   stringProp(props, "canonical"),
-		Image:       stringProp(props, "image"),
-		OGType:      stringProp(props, "ogType"),
+func buildMetaTagHTML(tag metaTag) string {
+	tagName := tag.TagName
+	if tagName == "" {
+		if tag.Rel != "" || tag.Href != "" {
+			tagName = "link"
+		} else {
+			tagName = "meta"
+		}
 	}
 
-	raw, ok := props["meta"].(map[string]any)
-	if !ok || len(raw) == 0 {
-		return meta
+	var attrs []string
+
+	if tag.Name != "" {
+		attrs = append(attrs, fmt.Sprintf(`name="%s"`, html.EscapeString(tag.Name)))
+	}
+	if tag.Property != "" {
+		attrs = append(attrs, fmt.Sprintf(`property="%s"`, html.EscapeString(tag.Property)))
+	}
+	if tag.Content != "" {
+		attrs = append(attrs, fmt.Sprintf(`content="%s"`, html.EscapeString(tag.Content)))
+	}
+	if tag.Rel != "" {
+		attrs = append(attrs, fmt.Sprintf(`rel="%s"`, html.EscapeString(tag.Rel)))
+	}
+	if tag.Href != "" {
+		attrs = append(attrs, fmt.Sprintf(`href="%s"`, html.EscapeString(tag.Href)))
 	}
 
-	if v := stringFromMap(raw, "title"); v != "" {
-		meta.Title = v
-	}
-	if v := stringFromMap(raw, "description"); v != "" {
-		meta.Description = v
-	}
-	if v := stringFromMap(raw, "url"); v != "" {
-		meta.URL = v
-	}
-	if v := stringFromMap(raw, "canonical"); v != "" {
-		meta.Canonical = v
-	}
-	if v := stringFromMap(raw, "image"); v != "" {
-		meta.Image = v
-	}
-	if v := stringFromMap(raw, "ogType"); v != "" {
-		meta.OGType = v
+	if len(attrs) == 0 {
+		return ""
 	}
 
-	return meta
+	sortMetaAttributes(attrs)
+
+	return fmt.Sprintf("<%s %s>", tagName, strings.Join(attrs, " "))
+}
+
+func sortMetaAttributes(attrs []string) {
+	sort.SliceStable(attrs, func(i, j int) bool {
+		iPriority := attrPriority(attrs[i])
+		jPriority := attrPriority(attrs[j])
+		if iPriority != jPriority {
+			return iPriority < jPriority
+		}
+		return attrs[i] < attrs[j]
+	})
+}
+
+func attrPriority(attr string) int {
+	if strings.HasPrefix(attr, "name=") {
+		return 0
+	}
+	if strings.HasPrefix(attr, "property=") {
+		return 1
+	}
+	return 2
+}
+
+func metaTagsFromProps(props map[string]any) []metaTag {
+	metaRaw, ok := props["meta"]
+	if !ok {
+		return buildDefaultMetaTags(props)
+	}
+
+	var tags []metaTag
+
+	switch v := metaRaw.(type) {
+	case []any:
+		tags = parseMetaArray(v)
+	case []map[string]any:
+		anySlice := make([]any, len(v))
+		for i, m := range v {
+			anySlice[i] = m
+		}
+		tags = parseMetaArray(anySlice)
+	default:
+		return buildDefaultMetaTags(props)
+	}
+
+	if len(tags) == 0 {
+		return buildDefaultMetaTags(props)
+	}
+
+	return tags
+}
+
+func parseMetaArray(metaArray []any) []metaTag {
+	tags := make([]metaTag, 0, len(metaArray))
+	for _, item := range metaArray {
+		itemMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+
+		tag := metaTag{
+			TagName:  stringFromMap(itemMap, "tagName"),
+			Name:     stringFromMap(itemMap, "name"),
+			Property: stringFromMap(itemMap, "property"),
+			Content:  stringFromMap(itemMap, "content"),
+			Rel:      stringFromMap(itemMap, "rel"),
+			Href:     stringFromMap(itemMap, "href"),
+			Title:    stringFromMap(itemMap, "title"),
+		}
+
+		if !isValidMetaTag(tag) {
+			continue
+		}
+
+		tags = append(tags, tag)
+	}
+
+	return tags
+}
+
+func buildDefaultMetaTags(props map[string]any) []metaTag {
+	title := stringProp(props, "title")
+	if title == "" {
+		title = "Page"
+	}
+
+	return []metaTag{
+		{Title: title},
+		{Name: "viewport", Content: "width=device-width, initial-scale=1.0"},
+	}
+}
+
+func isValidMetaTag(tag metaTag) bool {
+	if tag.Title != "" {
+		return true
+	}
+
+	if tag.Name != "" && tag.Content != "" {
+		return true
+	}
+
+	if tag.Property != "" && tag.Content != "" {
+		return true
+	}
+
+	if tag.Rel != "" && tag.Href != "" {
+		return true
+	}
+
+	if tag.TagName != "" {
+		return tag.Name != "" || tag.Property != "" ||
+			tag.Content != "" || tag.Rel != "" || tag.Href != ""
+	}
+
+	return false
 }
 
 func stringFromMap(m map[string]any, key string) string {
@@ -1872,7 +1987,7 @@ func bundleTSXFile(componentPath string) (string, []string, error) {
 
 	// Write entry that wraps the component file with renderToString
 	entryCode := fmt.Sprintf(`
-import { renderToString } from 'react-dom/server';
+import { renderToString } from 'react-dom/server.edge';
 import Component from '%s';
 
 export default function render(props: any) {

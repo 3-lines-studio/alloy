@@ -76,7 +76,7 @@ In production, alloy loads prebuilt `app/dist/alloy/home-server.js` from embedde
 
 Server bundle contains:
 - Your React component
-- react and react-dom/server
+- react and react-dom/server.edge
 - Dependencies imported by your component
 - Polyfills for QuickJS environment
 
@@ -85,7 +85,7 @@ Server bundle contains:
 QuickJS executes:
 
 ```js
-import { renderToString } from 'react-dom/server';
+import { renderToString } from 'react-dom/server.edge';
 import Component from './home';
 
 const props = JSON.parse(propsJSON);
