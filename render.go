@@ -535,15 +535,24 @@ func (r *RenderResult) buildCSSTag() string {
 }
 
 func (r *RenderResult) buildScriptTag() string {
+	timestamp := time.Now().UnixNano()
 	switch {
 	case len(r.ClientPaths) > 0:
 		var b strings.Builder
 		for _, p := range r.ClientPaths {
-			fmt.Fprintf(&b, "<script type=\"module\" src=\"%s\"></script>\n", p)
+			scriptURL := p
+			if !isHashedAsset(scriptURL) {
+				scriptURL = fmt.Sprintf("%s?v=%d", scriptURL, timestamp)
+			}
+			fmt.Fprintf(&b, "<script type=\"module\" src=\"%s\"></script>\n", scriptURL)
 		}
 		return strings.TrimSuffix(b.String(), "\n")
 	case r.ClientPath != "":
-		return fmt.Sprintf(`<script type="module" src="%s"></script>`, r.ClientPath)
+		scriptURL := r.ClientPath
+		if !isHashedAsset(scriptURL) {
+			scriptURL = fmt.Sprintf("%s?v=%d", scriptURL, timestamp)
+		}
+		return fmt.Sprintf(`<script type="module" src="%s"></script>`, scriptURL)
 	case r.ClientJS != "":
 		return fmt.Sprintf(`<script type="module">%s</script>`, r.ClientJS)
 	}
@@ -964,6 +973,7 @@ func baseNames(paths []string) []string {
 }
 
 // RegisterPrebuiltBundleFromFS reads assets from an fs.FS and registers them.
+// If files are not found in the provided filesystem, falls back to OS filesystem for dev mode.
 func RegisterPrebuiltBundleFromFS(componentPath string, rootID string, filesystem fs.FS, files PrebuiltFiles) error {
 	if filesystem == nil {
 		return fmt.Errorf("filesystem required")
@@ -971,15 +981,22 @@ func RegisterPrebuiltBundleFromFS(componentPath string, rootID string, filesyste
 	if files.Server == "" || files.Client == "" || files.CSS == "" {
 		return fmt.Errorf("prebuilt file paths required")
 	}
-	serverBytes, err := fs.ReadFile(filesystem, files.Server)
+
+	readFS := filesystem
+	serverBytes, err := fs.ReadFile(readFS, files.Server)
+	if errors.Is(err, fs.ErrNotExist) {
+		readFS = os.DirFS(".")
+		serverBytes, err = fs.ReadFile(readFS, files.Server)
+	}
 	if err != nil {
 		return fmt.Errorf("read server bundle: %w", err)
 	}
-	clientBytes, err := fs.ReadFile(filesystem, files.Client)
+
+	clientBytes, err := fs.ReadFile(readFS, files.Client)
 	if err != nil {
 		return fmt.Errorf("read client bundle: %w", err)
 	}
-	cssBytes, err := fs.ReadFile(filesystem, files.CSS)
+	cssBytes, err := fs.ReadFile(readFS, files.CSS)
 	if err != nil {
 		return fmt.Errorf("read css: %w", err)
 	}
@@ -1279,14 +1296,17 @@ func isHashedAsset(assetPath string) bool {
 		if len(part) < 8 {
 			continue
 		}
-		hashed := true
+		allAlphaNum := true
+		hasDigit := false
 		for _, r := range part {
-			if !strings.ContainsRune("0123456789abcdef", r) {
-				hashed = false
+			if (r >= '0' && r <= '9') {
+				hasDigit = true
+			} else if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')) {
+				allAlphaNum = false
 				break
 			}
 		}
-		if hashed {
+		if allAlphaNum && hasDigit {
 			return true
 		}
 	}

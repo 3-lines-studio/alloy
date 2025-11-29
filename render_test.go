@@ -128,10 +128,10 @@ func TestRenderResultToHTMLWithAssets(t *testing.T) {
 	if !strings.Contains(html, `<link rel="stylesheet" href="/styles/app.css?v=`) {
 		t.Fatalf("missing css link: %s", html)
 	}
-	if !strings.Contains(html, `<script type="module" src="/static/a.js"></script>`) {
+	if !strings.Contains(html, `<script type="module" src="/static/a.js?v=`) {
 		t.Fatalf("missing first client script: %s", html)
 	}
-	if !strings.Contains(html, `<script type="module" src="/static/b.js"></script>`) {
+	if !strings.Contains(html, `<script type="module" src="/static/b.js?v=`) {
 		t.Fatalf("missing second client script: %s", html)
 	}
 	if !strings.Contains(html, `"note":"n"`) {
@@ -160,6 +160,27 @@ func TestRenderResultToHTMLWithoutClient(t *testing.T) {
 	html := result.ToHTML("root")
 	if html != result.HTML {
 		t.Fatalf("expected raw html without hydration, got %s", html)
+	}
+}
+
+func TestRenderResultHashedAssetsNoTimestamp(t *testing.T) {
+	result := RenderResult{
+		HTML:        "<div>prod</div>",
+		ClientPaths: []string{"/static/app-abc12345.js", "/static/chunk-def67890.js"},
+		CSSPath:     "/static/shared-894b8266.css",
+		Props:       map[string]any{},
+	}
+
+	html := result.ToHTML("app-root")
+
+	if strings.Contains(html, "?v=") {
+		t.Fatalf("hashed assets should not have timestamp query params: %s", html)
+	}
+	if !strings.Contains(html, `src="/static/app-abc12345.js"`) {
+		t.Fatalf("missing hashed script without timestamp: %s", html)
+	}
+	if !strings.Contains(html, `href="/static/shared-894b8266.css"`) {
+		t.Fatalf("missing hashed css without timestamp: %s", html)
 	}
 }
 
@@ -340,8 +361,11 @@ func TestIsHashedAsset(t *testing.T) {
 	}{
 		{name: "logo-abcdef12.png", want: true},
 		{name: "bundle-12345678.js", want: true},
+		{name: "client-44QNSIEN.js", want: true},
+		{name: "chunk-UE5HRNN5.js", want: true},
 		{name: "plain.js", want: false},
 		{name: "logo-xyz.png", want: false},
+		{name: "home-client.js", want: false},
 	}
 
 	for _, tt := range cases {
