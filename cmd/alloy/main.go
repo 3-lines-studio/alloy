@@ -214,13 +214,13 @@ func runDev(args []string) {
 
 			defaultConfig := `
 root = "."
-tmp_dir = ".air"
+tmp_dir = ".alloy/tmp"
 
 [build]
-cmd = "go build -o .air/server main.go"
-entrypoint = [".air/server"]
+cmd = "go build -o .alloy/tmp/server main.go"
+entrypoint = [".alloy/tmp/server"]
 include_ext = ["go", "json", "js", "css"]
-exclude_dir = ["node_modules", ".git"]
+exclude_dir = ["node_modules", ".git", ".alloy"]
 
 [log]
 time = false

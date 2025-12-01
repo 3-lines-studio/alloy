@@ -1,5 +1,5 @@
 .gocache/
-.air/
+.alloy/
 .alloy-cache/
 .cache/
 
@@ -19,7 +19,6 @@ coverage/
 
 # Node artifacts
 node_modules/
-dist/
 .pnpm-store/
 npm-debug.log*
 yarn-error.log*

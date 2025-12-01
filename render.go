@@ -44,7 +44,8 @@ var (
 const (
 	DefaultAppDir   = "app"
 	DefaultPagesDir = "app/pages"
-	DefaultDistDir  = "dist"
+	DefaultDistDir  = ".alloy/dist"
+	AlloyBaseDir    = ".alloy"
 
 	defaultRenderTimeout = 2 * time.Second
 	quickjsStackSize     = 4 * 1024 * 1024

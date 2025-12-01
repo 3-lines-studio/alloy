@@ -38,7 +38,7 @@ air
 **Build for production:**
 ```sh
 alloy build                                    # Auto-discovers app/pages/*.tsx
-alloy build -pages app/pages -out app/dist/alloy  # Explicit paths
+alloy build -pages app/pages  # Uses default .alloy/dist
 ```
 
 ## Core Architecture
@@ -127,8 +127,7 @@ Props are passed to both SSR and client hydration.
 
 Three asset root directories:
 - `public/`: Public static assets (images, favicon, etc.)
-- `app/dist/`: Generated bundles
-- `dist/`: Alternative dist location
+- `.alloy/dist/`: Generated bundles
 
 **Cache headers:**
 - Hashed assets: 1 year immutable cache
@@ -184,7 +183,7 @@ map[string]any{
 ### Production Workflow
 
 1. Run `alloy build` to create optimized bundles with content hashes
-2. Embed assets with `//go:embed app/dist/alloy/* public/*`
+2. Embed assets with `//go:embed .alloy/dist/* public/*`
 3. Set `PRODUCTION=1` environment variable
 4. Server detects production mode and uses embedded filesystem
 5. Deploy single binary

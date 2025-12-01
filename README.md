@@ -22,15 +22,15 @@ Requires Go 1.25+ and a Node toolchain with `tailwindcss` available via `pnpm`, 
 alloy
 
 # for more options
-alloy -pages app/pages -out app/dist/alloy
+alloy -pages app/pages
 ```
 
-This writes server/client/CSS bundles and a `manifest.json` under `app/dist/alloy`.
+This writes server/client/CSS bundles and a `manifest.json` under `.alloy/dist`.
 
 3. Serve prebuilt bundles:
 
 ```go
-//go:embed app/dist/alloy/* public/*
+//go:embed .alloy/dist/* public/*
 var dist embed.FS
 
 pages := []alloy.Page{

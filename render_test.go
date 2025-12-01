@@ -18,7 +18,7 @@ func TestRenderTSXFileWithHydration(t *testing.T) {
 	componentPath := filepath.Join(sampleDir, "app", "pages", "home.tsx")
 	rootID := defaultRootID(componentPath)
 
-	files, err := resolvePrebuiltFiles(os.DirFS(sampleDir), "app/pages/home.tsx", "", "home")
+	files, err := resolvePrebuiltFiles(os.DirFS(sampleDir), "app/pages/home.tsx")
 	if err != nil {
 		t.Fatalf("resolve prebuilt files: %v", err)
 	}
@@ -236,10 +236,10 @@ func TestRenderPrebuiltUsesCachedBundles(t *testing.T) {
 	}
 
 	files := PrebuiltFiles{
-		Server:       filepath.Join("dist", "page-server.js"),
-		Client:       filepath.Join("dist", "page-client.js"),
-		CSS:          filepath.Join("dist", "page.css"),
-		ClientChunks: []string{filepath.Join("dist", "chunk-1.js")},
+		Server:       filepath.Join(".alloy/dist", "page-server.js"),
+		Client:       filepath.Join(".alloy/dist", "page-client.js"),
+		CSS:          filepath.Join(".alloy/dist", "page.css"),
+		ClientChunks: []string{filepath.Join(".alloy/dist", "chunk-1.js")},
 	}
 
 	props := map[string]any{"msg": "hi"}
@@ -357,8 +357,8 @@ func TestIsHashedAsset(t *testing.T) {
 	}{
 		{name: "logo-abcdef12.png", want: true},
 		{name: "bundle-12345678.js", want: true},
-		{name: "client-44QNSIEN.js", want: true},
-		{name: "chunk-UE5HRNN5.js", want: true},
+		{name: "client-44F5A8B9C.js", want: true},
+		{name: "chunk-A1B2C3D4E.js", want: true},
 		{name: "plain.js", want: false},
 		{name: "logo-xyz.png", want: false},
 		{name: "home-client.js", want: false},
@@ -380,11 +380,11 @@ func TestDefaultRootAndJoinPaths(t *testing.T) {
 		t.Fatalf("default root fallback: want root, got %s", got)
 	}
 
-	paths := joinPaths("dist", []string{"a.js", "b.js"})
+	paths := joinPaths(".alloy/dist", []string{"a.js", "b.js"})
 	if len(paths) != 2 {
 		t.Fatalf("join paths length: want 2, got %d", len(paths))
 	}
-	if paths[0] != path.Join("dist", "a.js") || paths[1] != path.Join("dist", "b.js") {
+	if paths[0] != path.Join(".alloy/dist", "a.js") || paths[1] != path.Join(".alloy/dist", "b.js") {
 		t.Fatalf("join paths mismatch: %v", paths)
 	}
 }
@@ -410,23 +410,23 @@ func TestResolvePrebuiltFilesReadsManifest(t *testing.T) {
 		t.Fatalf("write manifest: %v", err)
 	}
 
-	files, err := resolvePrebuiltFiles(os.DirFS(dir), "pages/home.tsx", "dist", "home")
+	files, err := resolvePrebuiltFiles(os.DirFS(dir), "pages/home.tsx")
 	if err != nil {
 		t.Fatalf("resolve files: %v", err)
 	}
 
-	wantServer := filepath.Join("dist", "home-aaaa1111-server.js")
+	wantServer := filepath.Join(".alloy/dist", "home-server.js")
 	if files.Server != wantServer {
 		t.Fatalf("server path: want %s, got %s", wantServer, files.Server)
 	}
-	wantClient := filepath.Join("dist", "home-bbbb2222-client.js")
+	wantClient := filepath.Join(".alloy/dist", "home-client.js")
 	if files.Client != wantClient {
 		t.Fatalf("client path: want %s, got %s", wantClient, files.Client)
 	}
-	if len(files.ClientChunks) != 1 || files.ClientChunks[0] != filepath.Join("dist", "chunk-123.js") {
-		t.Fatalf("client chunks: %v", files.ClientChunks)
+	if len(files.ClientChunks) != 0 {
+		t.Fatalf("client chunks: expected none, got %v", files.ClientChunks)
 	}
-	wantCSS := filepath.Join("dist", "home-cccc3333.css")
+	wantCSS := filepath.Join(".alloy/dist", "home.css")
 	if files.CSS != wantCSS {
 		t.Fatalf("css path: want %s, got %s", wantCSS, files.CSS)
 	}
@@ -521,9 +521,9 @@ export default function Page({ title }: { title: string }) {
 	}
 
 	files := PrebuiltFiles{
-		Server: filepath.Join("dist", "page-server.js"),
-		Client: filepath.Join("dist", "page-client.js"),
-		CSS:    filepath.Join("dist", "page.css"),
+		Server: filepath.Join(".alloy/dist", "page-server.js"),
+		Client: filepath.Join(".alloy/dist", "page-client.js"),
+		CSS:    filepath.Join(".alloy/dist", "page.css"),
 	}
 
 	b.Run("render_prebuilt", func(b *testing.B) {
