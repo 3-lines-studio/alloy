@@ -1644,8 +1644,8 @@ func WatchTailwind(ctx context.Context, inputPath, outputPath, cwd string) *exec
 
 	cmd := exec.CommandContext(ctx, runner, args...)
 	cmd.Dir = cwd
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = QuietWriter()
+	cmd.Stderr = QuietWriter()
 
 	return cmd
 }
@@ -1658,6 +1658,9 @@ func WatchAndBuild(ctx context.Context, pages []PageSpec, distDir string, buildD
 	if err := BuildDevBundles(pages, distDir); err != nil {
 		return fmt.Errorf("initial build: %w", err)
 	}
+
+	logger := NewLogger()
+	logger.Success(fmt.Sprintf("Initial build complete: %d pages", len(pages)))
 
 	if buildDone != nil {
 		close(buildDone)

@@ -82,7 +82,7 @@ Create `.air.toml`:
 ```toml
 [build]
   cmd = "go build -o tmp/main ."
-  bin = "tmp/main"
+  entrypoint = ["tmp/main"]
   include_ext = ["go"]
   exclude_dir = ["tmp", "node_modules", "app/dist"]
 

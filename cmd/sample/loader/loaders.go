@@ -52,8 +52,8 @@ func Blog(r *http.Request) map[string]any {
 }
 
 func Product(r *http.Request) map[string]any {
-	store := r.PathValue("store-slug")
-	product := r.PathValue("product-slug")
+	store := r.PathValue("storeSlug")
+	product := r.PathValue("productSlug")
 	title := "Product detail"
 	if store != "" && product != "" {
 		title = store + " / " + product

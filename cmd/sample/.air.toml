@@ -4,7 +4,7 @@ tmp_dir = ".air"
 
 [build]
 cmd = "go build -o .air/server main.go"
-bin = ".air/server"
+entrypoint = [".air/server"]
 include_ext = ["go"]
 exclude_dir = ["node_modules", ".git", ".alloy-cache", ".gocache", ".air", "dist"]
 kill_delay = 300

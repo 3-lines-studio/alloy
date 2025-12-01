@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -14,6 +13,8 @@ import (
 	"github.com/3-lines-studio/alloy"
 	"golang.org/x/sync/errgroup"
 )
+
+var logger = alloy.NewLogger()
 
 func main() {
 	if len(os.Args) < 2 {
@@ -71,37 +72,47 @@ func runBuild(args []string) {
 
 	pagesDir = defaultPagesDir(pagesDir)
 	if pagesDir == "" {
-		log.Fatal("pages dir required")
+		logger.Error("pages dir required")
+		os.Exit(1)
 	}
 	distDir = defaultDistDir(distDir)
 	if distDir == "" {
-		log.Fatal("out dir required")
+		logger.Error("out dir required")
+		os.Exit(1)
 	}
 
 	cleanDist := filepath.Clean(distDir)
 	if cleanDist == "." || cleanDist == string(filepath.Separator) {
-		log.Fatalf("refusing to remove dist dir %q", distDir)
+		logger.Error(fmt.Sprintf("refusing to remove dist dir %q", distDir))
+		os.Exit(1)
 	}
 	if err := os.RemoveAll(cleanDist); err != nil {
-		log.Fatal(err)
+		logger.Error(err.Error())
+		os.Exit(1)
 	}
 
 	pages, err := alloy.DiscoverPages(pagesDir)
 	if err != nil {
-		log.Fatal(err)
+		logger.Error(err.Error())
+		os.Exit(1)
 	}
 	if len(pages) == 0 {
-		log.Fatalf("no pages found in %s", pagesDir)
+		logger.Error(fmt.Sprintf("no pages found in %s", pagesDir))
+		os.Exit(1)
 	}
+
+	logger.Start("Building production bundles...")
 
 	cssPath := filepath.Join(alloy.DefaultAppDir, "app.css")
 	sharedCSS, err := alloy.RunTailwind(cssPath, filepath.Dir(pagesDir))
 	if err != nil {
-		log.Fatal(err)
+		logger.Error(err.Error())
+		os.Exit(1)
 	}
 	sharedCSSPath, err := alloy.SaveCSS(sharedCSS, distDir, "shared")
 	if err != nil {
-		log.Fatal(err)
+		logger.Error(err.Error())
+		os.Exit(1)
 	}
 
 	clientInputs := make([]alloy.ClientEntry, 0, len(pages))
@@ -115,16 +126,18 @@ func runBuild(args []string) {
 
 	clientAssets, err := alloy.BuildClientBundles(clientInputs, distDir)
 	if err != nil {
-		log.Fatal(err)
+		logger.Error(err.Error())
+		os.Exit(1)
 	}
 
 	for _, page := range pages {
 		if err := buildPage(page, distDir, clientAssets[page.Name], sharedCSSPath); err != nil {
-			log.Fatal(err)
+			logger.Error(err.Error())
+			os.Exit(1)
 		}
 	}
 
-	log.Printf("build complete: %d pages -> %s", len(pages), distDir)
+	logger.Success(fmt.Sprintf("Build complete: %d pages → %s", len(pages), alloy.FormatPath(distDir)))
 }
 
 func runDev(args []string) {
@@ -140,15 +153,18 @@ func runDev(args []string) {
 	distDir = defaultDistDir(distDir)
 
 	if err := os.MkdirAll(distDir, 0755); err != nil {
-		log.Fatalf("create dist dir: %v", err)
+		logger.Error(fmt.Sprintf("create dist dir: %v", err))
+		os.Exit(1)
 	}
 
 	pages, err := alloy.DiscoverPages(pagesDir)
 	if err != nil {
-		log.Fatal(err)
+		logger.Error(err.Error())
+		os.Exit(1)
 	}
 	if len(pages) == 0 {
-		log.Fatalf("no pages found in %s", pagesDir)
+		logger.Error(fmt.Sprintf("no pages found in %s", pagesDir))
+		os.Exit(1)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -159,7 +175,7 @@ func runDev(args []string) {
 
 	go func() {
 		<-sigChan
-		log.Println("shutting down...")
+		fmt.Println("\n→ Shutting down...")
 		cancel()
 	}()
 
@@ -168,7 +184,7 @@ func runDev(args []string) {
 	var g errgroup.Group
 
 	g.Go(func() error {
-		log.Printf("starting asset watcher: %d pages in %s", len(pages), pagesDir)
+		logger.Start(fmt.Sprintf("Watching %d pages in %s", len(pages), alloy.FormatPath(pagesDir)))
 		err := alloy.WatchAndBuild(ctx, pages, distDir, initialBuildDone)
 		if err == context.Canceled {
 			return nil
@@ -197,15 +213,20 @@ func runDev(args []string) {
 			configPath = tmpConfig.Name()
 			defer os.Remove(configPath)
 
-			defaultConfig := `root = "."
+			defaultConfig := `
+root = "."
 tmp_dir = ".air"
 
 [build]
 cmd = "go build -o .air/server main.go"
-bin = ".air/server"
+entrypoint = [".air/server"]
 include_ext = ["go", "json", "js", "css"]
 exclude_dir = ["node_modules", ".git"]
-kill_delay = 300
+
+[log]
+time = false
+main_only = true
+silent = true
 
 [proxy]
 enabled = true
@@ -224,7 +245,7 @@ app_port = 8080
 		cmd.Stdin = os.Stdin
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-		log.Println("starting air for Go hot reload")
+		logger.Start("Starting Go hot reload")
 		if err := cmd.Start(); err != nil {
 			return fmt.Errorf("start air: %w", err)
 		}
@@ -249,7 +270,8 @@ app_port = 8080
 	})
 
 	if err := g.Wait(); err != nil {
-		log.Fatal(err)
+		logger.Error(err.Error())
+		os.Exit(1)
 	}
 }
 
@@ -276,7 +298,7 @@ func buildPage(page alloy.PageSpec, distDir string, client alloy.ClientAssets, s
 		return fmt.Errorf("write manifest %s: %w", page.Component, err)
 	}
 
-	log.Printf("built %s -> %s (client: %s)", page.Component, distDir, client.Entry)
+	logger.Debug(fmt.Sprintf("built %s → %s (client: %s)", alloy.FormatPath(page.Component), alloy.FormatPath(distDir), client.Entry))
 	return nil
 }
 
