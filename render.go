@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -35,46 +36,19 @@ var (
 	entryTemplate       string
 	clientEntryTemplate string
 	renderTemplate      string
+	renderTimeout       atomic.Value
+	jsPool              *runtimePool
+	globalConfig        atomic.Value
 )
 
 const (
 	DefaultAppDir   = "app"
 	DefaultPagesDir = "app/pages"
 	DefaultDistDir  = "dist"
-)
 
-const (
 	defaultRenderTimeout = 2 * time.Second
 	quickjsStackSize     = 4 * 1024 * 1024
 )
-
-type RenderResult struct {
-	HTML        string
-	ClientJS    string
-	CSS         string
-	Props       map[string]any
-	ClientPath  string
-	ClientPaths []string
-	CSSPath     string
-}
-
-type ClientAssets struct {
-	Entry  string
-	Chunks []string
-}
-
-type ClientEntry struct {
-	Name      string
-	Component string
-	RootID    string
-}
-
-type PrebuiltFiles struct {
-	Server       string
-	Client       string
-	ClientChunks []string
-	CSS          string
-}
 
 type jsRuntime struct {
 	rt  *quickjs.Runtime
@@ -106,17 +80,44 @@ type assetRoot struct {
 	fileServer http.Handler
 }
 
+type serverCtxInfo struct {
+	ctx api.BuildContext
+	tmp string
+}
+
+type PrebuiltFiles struct {
+	Server       string
+	Client       string
+	ClientChunks []string
+	CSS          string
+}
+
+type RenderResult struct {
+	HTML        string
+	ClientJS    string
+	CSS         string
+	Props       map[string]any
+	ClientPath  string
+	ClientPaths []string
+	CSSPath     string
+}
+
+type ClientAssets struct {
+	Entry  string
+	Chunks []string
+}
+
+type ClientEntry struct {
+	Name      string
+	Component string
+	RootID    string
+}
+
 type HeadTag struct {
 	Tag   string
 	Attrs map[string]string
 	Text  string
 }
-
-var (
-	renderTimeout atomic.Value
-	jsPool        *runtimePool
-	globalConfig  atomic.Value
-)
 
 type Config struct {
 	FS              fs.FS
@@ -127,6 +128,32 @@ type Config struct {
 	DistDir         string
 	RenderTimeout   time.Duration
 	RuntimePoolSize int
+}
+
+type PageHandler struct {
+	component string
+	loader    func(r *http.Request) map[string]any
+	ctx       func(r *http.Request) context.Context
+}
+
+type PageSpec struct {
+	Component string
+	Name      string
+	RootID    string
+}
+
+func init() {
+	loadEmbeddedAssets()
+	renderTimeout.Store(defaultRenderTimeout)
+	jsPool = newRuntimePool(defaultRuntimePoolSize())
+	globalConfig.Store(&Config{
+		DefaultTitle:    "Alloy",
+		AppDir:          DefaultAppDir,
+		PagesDir:        DefaultPagesDir,
+		DistDir:         DefaultDistDir,
+		RenderTimeout:   defaultRenderTimeout,
+		RuntimePoolSize: defaultRuntimePoolSize(),
+	})
 }
 
 func loadEmbeddedAssets() {
@@ -143,20 +170,6 @@ func mustReadAsset(path string) string {
 		panic(fmt.Sprintf("failed to load %s: %v", path, err))
 	}
 	return string(data)
-}
-
-func init() {
-	loadEmbeddedAssets()
-	renderTimeout.Store(defaultRenderTimeout)
-	jsPool = newRuntimePool(defaultRuntimePoolSize())
-	globalConfig.Store(&Config{
-		DefaultTitle:    "Alloy",
-		AppDir:          DefaultAppDir,
-		PagesDir:        DefaultPagesDir,
-		DistDir:         DefaultDistDir,
-		RenderTimeout:   defaultRenderTimeout,
-		RuntimePoolSize: defaultRuntimePoolSize(),
-	})
 }
 
 func Init(filesystem fs.FS, options ...func(*Config)) {
@@ -180,7 +193,7 @@ func Init(filesystem fs.FS, options ...func(*Config)) {
 		renderTimeout.Store(cfg.RenderTimeout)
 	}
 
-	if cfg.RuntimePoolSize > 0 && cfg.RuntimePoolSize != defaultRuntimePoolSize() {
+	if cfg.RuntimePoolSize > 0 {
 		jsPool = newRuntimePool(cfg.RuntimePoolSize)
 	}
 
@@ -190,12 +203,6 @@ func Init(filesystem fs.FS, options ...func(*Config)) {
 func getConfig() *Config {
 	cfg, _ := globalConfig.Load().(*Config)
 	return cfg
-}
-
-type PageHandler struct {
-	component string
-	loader    func(r *http.Request) map[string]any
-	ctx       func(r *http.Request) context.Context
 }
 
 func NewPage(component string) *PageHandler {
@@ -209,17 +216,8 @@ func (h *PageHandler) WithLoader(loader func(r *http.Request) map[string]any) *P
 	return h
 }
 
-func (h *PageHandler) WithContext(ctx func(r *http.Request) context.Context) *PageHandler {
-	h.ctx = ctx
-	return h
-}
-
 func (h *PageHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cfg := getConfig()
-	if cfg == nil || cfg.FS == nil {
-		http.Error(w, "alloy not initialized: call alloy.Init(fs) first", http.StatusInternalServerError)
-		return
-	}
 
 	if tryServeAsset(w, r, cfg.FS) {
 		return
@@ -231,15 +229,7 @@ func (h *PageHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		props = h.loader(r)
 	}
 
-	ctx := r.Context()
-	if h.ctx != nil {
-		custom := h.ctx(r)
-		if custom != nil {
-			ctx = custom
-		}
-	}
-
-	files, err := resolvePrebuiltFiles(cfg.FS, h.component, "", "")
+	files, err := resolvePrebuiltFiles(cfg.FS, h.component)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -250,11 +240,11 @@ func (h *PageHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		ServePrebuiltPageWithContext(ctx, w, r, h.component, props, rootID, files)
+		ServePrebuiltPageWithContext(w, r, h.component, props, rootID, files)
 		return
 	}
 
-	ServePageWithContext(ctx, w, r, h.component, props, rootID)
+	ServePageWithContext(w, r, h.component, props, rootID)
 }
 
 func tryServeAsset(w http.ResponseWriter, r *http.Request, filesystem fs.FS) bool {
@@ -309,10 +299,6 @@ func defaultRuntimePoolSize() int {
 }
 
 func (p *runtimePool) acquire(ctx context.Context) (*jsRuntime, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
 	select {
 	case p.sem <- struct{}{}:
 	case <-ctx.Done():
@@ -379,10 +365,6 @@ func currentRenderTimeout() time.Duration {
 }
 
 func loadPolyfills(ctx *quickjs.Context) error {
-	if ctx == nil {
-		return fmt.Errorf("context required")
-	}
-
 	result := ctx.Eval(polyfillsSource)
 	if result.IsException() {
 		return fmt.Errorf("polyfills: %s", ctx.Exception().Error())
@@ -402,11 +384,8 @@ func ServePage(w http.ResponseWriter, r *http.Request, componentPath string, pro
 	fmt.Fprint(w, result.ToHTML(rootID))
 }
 
-func ServePageWithContext(ctx context.Context, w http.ResponseWriter, r *http.Request, componentPath string, props map[string]any, rootID string) {
-	if ctx == nil {
-		ctx = r.Context()
-	}
-	result, err := RenderTSXFileWithHydrationWithContext(ctx, componentPath, props, rootID)
+func ServePageWithContext(w http.ResponseWriter, r *http.Request, componentPath string, props map[string]any, rootID string) {
+	result, err := RenderTSXFileWithHydrationWithContext(r.Context(), componentPath, props, rootID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -586,10 +565,6 @@ func stringFromMap(m map[string]any, key string) string {
 	return str
 }
 
-func RenderTSXFileWithHydration(filePath string, props map[string]any, rootID string) (*RenderResult, error) {
-	return RenderTSXFileWithHydrationWithContext(context.Background(), filePath, props, rootID)
-}
-
 func RenderTSXFileWithHydrationWithContext(ctx context.Context, filePath string, props map[string]any, rootID string) (*RenderResult, error) {
 	absPath, err := resolveAbsPath(filePath, "component path")
 	if err != nil {
@@ -616,10 +591,6 @@ func RenderTSXFileWithHydrationWithContext(ctx context.Context, filePath string,
 		CSS:      css,
 		Props:    props,
 	}, nil
-}
-
-func RenderPrebuilt(filePath string, props map[string]any, rootID string, files PrebuiltFiles) (*RenderResult, error) {
-	return RenderPrebuiltWithContext(context.Background(), filePath, props, rootID, files)
 }
 
 func RenderPrebuiltWithContext(ctx context.Context, filePath string, props map[string]any, rootID string, files PrebuiltFiles) (*RenderResult, error) {
@@ -1148,47 +1119,17 @@ func collectAssetRoots(filesystem fs.FS) []assetRoot {
 	return roots
 }
 
+var hashPattern = regexp.MustCompile(`-[a-fA-F0-9]{8,}\.`)
+
 func isHashedAsset(assetPath string) bool {
-	base := filepath.Base(assetPath)
-	name := strings.TrimSuffix(base, filepath.Ext(base))
-	parts := strings.SplitSeq(name, "-")
-	for part := range parts {
-		if len(part) < 8 {
-			continue
-		}
-		allAlphaNum := true
-		hasDigit := false
-		for _, r := range part {
-			if r >= '0' && r <= '9' {
-				hasDigit = true
-			} else if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')) {
-				allAlphaNum = false
-				break
-			}
-		}
-		if allAlphaNum && hasDigit {
-			return true
-		}
-	}
-	return false
+	return hashPattern.MatchString(filepath.Base(assetPath))
 }
 
 func normalizeAssetPath(requestPath string) string {
-	if requestPath == "" {
+	clean := path.Clean(strings.TrimPrefix(requestPath, "/"))
+	if clean == "." || clean == "" || strings.HasPrefix(clean, "..") {
 		return ""
 	}
-
-	trimmed := strings.TrimPrefix(requestPath, "/")
-	clean := path.Clean(trimmed)
-	isRoot := clean == "." || clean == ""
-	if isRoot {
-		return ""
-	}
-
-	if strings.HasPrefix(clean, "..") {
-		return ""
-	}
-
 	return clean
 }
 
@@ -1215,24 +1156,15 @@ func mustResolveAbsPath(path string) string {
 	return abs
 }
 
-func resolvePrebuiltFiles(filesystem fs.FS, component string, distDir string, name string) (PrebuiltFiles, error) {
-	dist := distDir
-	if dist == "" {
-		dist = DefaultDistDir
-	}
+func resolvePrebuiltFiles(filesystem fs.FS, component string) (PrebuiltFiles, error) {
+	dist := DefaultDistDir
+	componentBase := filepath.Base(component)
+	base := strings.TrimSuffix(componentBase, filepath.Ext(componentBase))
 
-	base := name
-	if base == "" {
-		componentBase := filepath.Base(component)
-		base = strings.TrimSuffix(componentBase, filepath.Ext(componentBase))
-	}
-
-	if filesystem != nil {
-		if manifestFiles, ok, err := lookupManifest(filesystem, dist, base); err != nil {
-			return PrebuiltFiles{}, err
-		} else if ok {
-			return manifestFiles, nil
-		}
+	if manifestFiles, ok, err := lookupManifest(filesystem, dist, base); err != nil {
+		return PrebuiltFiles{}, err
+	} else if ok {
+		return manifestFiles, nil
 	}
 
 	return PrebuiltFiles{
@@ -1375,12 +1307,6 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-type PageSpec struct {
-	Component string
-	Name      string
-	RootID    string
-}
-
 func BuildDevBundles(pages []PageSpec, distDir string) error {
 	if len(pages) == 0 {
 		return fmt.Errorf("no pages provided")
@@ -1518,10 +1444,6 @@ func WatchAndBuild(ctx context.Context, pages []PageSpec, distDir string, buildD
 
 	var g errgroup.Group
 
-	type serverCtxInfo struct {
-		ctx api.BuildContext
-		tmp string
-	}
 	serverCtxs := make([]serverCtxInfo, 0, len(pages))
 
 	for _, page := range pages {
@@ -1690,9 +1612,6 @@ func readBundlesFromCache(path string, rootID string) (string, string, string) {
 }
 
 func executeSSR(ctx context.Context, jsCode string, props map[string]any) (string, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if timeout := currentRenderTimeout(); timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -1712,9 +1631,6 @@ func executeSSR(ctx context.Context, jsCode string, props map[string]any) (strin
 }
 
 func makeInterruptHandler(ctx context.Context) quickjs.InterruptHandler {
-	if ctx == nil {
-		return nil
-	}
 	return func() int {
 		select {
 		case <-ctx.Done():
@@ -1786,11 +1702,8 @@ func filterOutPath(paths []string, skip string) []string {
 	return filtered
 }
 
-func ServePrebuiltPageWithContext(ctx context.Context, w http.ResponseWriter, r *http.Request, componentPath string, props map[string]any, rootID string, files PrebuiltFiles) {
-	if ctx == nil {
-		ctx = r.Context()
-	}
-	result, err := RenderPrebuiltWithContext(ctx, componentPath, props, rootID, files)
+func ServePrebuiltPageWithContext(w http.ResponseWriter, r *http.Request, componentPath string, props map[string]any, rootID string, files PrebuiltFiles) {
+	result, err := RenderPrebuiltWithContext(r.Context(), componentPath, props, rootID, files)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

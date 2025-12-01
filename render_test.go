@@ -27,7 +27,7 @@ func TestRenderTSXFileWithHydration(t *testing.T) {
 	}
 
 	props := map[string]any{"title": "Fixture", "items": []string{"One", "Two"}}
-	result, err := RenderTSXFileWithHydration(componentPath, props, rootID)
+	result, err := RenderTSXFileWithHydrationWithContext(context.Background(), componentPath, props, rootID)
 	if err != nil {
 		t.Fatalf("RenderTSXFileWithHydration failed: %v", err)
 	}
@@ -50,7 +50,6 @@ func TestRenderTSXFileWithHydration(t *testing.T) {
 		t.Errorf("props json missing from document: %s", full)
 	}
 }
-
 
 func TestRenderTSXFileWithHydrationRequiresCSS(t *testing.T) {
 	resetBundleCache()
@@ -93,7 +92,7 @@ func TestRenderTSXFileWithHydrationRequiresRegisteredInProd(t *testing.T) {
 		t.Fatalf("write css: %v", err)
 	}
 
-	_, err := RenderTSXFileWithHydration(componentPath, nil, "root")
+	_, err := RenderTSXFileWithHydrationWithContext(context.Background(), componentPath, nil, "root")
 	if err == nil {
 		t.Fatalf("expected error when bundle not registered in prod")
 	}
@@ -101,8 +100,6 @@ func TestRenderTSXFileWithHydrationRequiresRegisteredInProd(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
-
-
 
 func TestRenderResultToHTMLWithAssets(t *testing.T) {
 	result := RenderResult{
@@ -246,7 +243,7 @@ func TestRenderPrebuiltUsesCachedBundles(t *testing.T) {
 	}
 
 	props := map[string]any{"msg": "hi"}
-	result, err := RenderPrebuilt(component, props, "root", files)
+	result, err := RenderPrebuiltWithContext(context.Background(), component, props, "root", files)
 	if err != nil {
 		t.Fatalf("render prebuilt: %v", err)
 	}
@@ -500,18 +497,18 @@ export default function Page({ title }: { title: string }) {
 	b.Run("full_cold", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			resetBundleCache()
-			if _, err := RenderTSXFileWithHydration(componentPath, props, "root"); err != nil {
+			if _, err := RenderTSXFileWithHydrationWithContext(context.Background(), componentPath, props, "root"); err != nil {
 				b.Fatalf("full cold: %v", err)
 			}
 		}
 	})
 
-	if _, err := RenderTSXFileWithHydration(componentPath, props, "root"); err != nil {
+	if _, err := RenderTSXFileWithHydrationWithContext(context.Background(), componentPath, props, "root"); err != nil {
 		b.Fatalf("prime cache: %v", err)
 	}
 	b.Run("full_warm", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			if _, err := RenderTSXFileWithHydration(componentPath, props, "root"); err != nil {
+			if _, err := RenderTSXFileWithHydrationWithContext(context.Background(), componentPath, props, "root"); err != nil {
 				b.Fatalf("full warm: %v", err)
 			}
 		}
@@ -531,13 +528,12 @@ export default function Page({ title }: { title: string }) {
 
 	b.Run("render_prebuilt", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			if _, err := RenderPrebuilt(componentPath, props, "root", files); err != nil {
+			if _, err := RenderPrebuiltWithContext(context.Background(), componentPath, props, "root", files); err != nil {
 				b.Fatalf("render prebuilt: %v", err)
 			}
 		}
 	})
 }
-
 
 func TestMetaTagsArrayFormat(t *testing.T) {
 	tests := []struct {

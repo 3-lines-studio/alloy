@@ -41,8 +41,7 @@ func printUsage() {
 
 Commands:
   build    Build production bundles with content hashes
-  dev      Watch and rebuild bundles on changes (no hashes)
-  watch    Run dev + air in parallel for complete hot reload
+  dev      Run with live reload
 
 Flags:
   -pages string
