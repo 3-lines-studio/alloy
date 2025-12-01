@@ -245,7 +245,7 @@ app_port = 8080
 		cmd.Stdin = os.Stdin
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-		logger.Start("Starting Go hot reload")
+		logger.Start("Starting live reload")
 		if err := cmd.Start(); err != nil {
 			return fmt.Errorf("start air: %w", err)
 		}

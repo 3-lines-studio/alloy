@@ -3,18 +3,19 @@ package alloy
 import (
 	"context"
 	"crypto/sha1"
+	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
 	"io/fs"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,17 @@ import (
 	"github.com/buke/quickjs-go"
 	"github.com/evanw/esbuild/pkg/api"
 	"golang.org/x/sync/errgroup"
+)
+
+//go:embed assets/*
+var assetsFS embed.FS
+
+var (
+	polyfillsSource     string
+	htmlTemplate        string
+	entryTemplate       string
+	clientEntryTemplate string
+	renderTemplate      string
 )
 
 const (
@@ -36,7 +48,6 @@ const (
 	quickjsStackSize     = 4 * 1024 * 1024
 )
 
-// RenderResult contains SSR HTML and optional client bundle for hydration
 type RenderResult struct {
 	HTML        string
 	ClientJS    string
@@ -47,20 +58,17 @@ type RenderResult struct {
 	CSSPath     string
 }
 
-// ClientAssets represents bundled client assets from BuildClientBundles
 type ClientAssets struct {
 	Entry  string
 	Chunks []string
 }
 
-// ClientEntry defines a client component entry point for bundling
 type ClientEntry struct {
 	Name      string
 	Component string
 	RootID    string
 }
 
-// PrebuiltFiles holds paths to prebuilt assets on disk.
 type PrebuiltFiles struct {
 	Server       string
 	Client       string
@@ -68,7 +76,6 @@ type PrebuiltFiles struct {
 	CSS          string
 }
 
-// Internal runtime types
 type jsRuntime struct {
 	rt  *quickjs.Runtime
 	ctx *quickjs.Context
@@ -79,7 +86,6 @@ type runtimePool struct {
 	size int
 }
 
-// Internal cache types
 type bundleCacheEntry struct {
 	serverJS   string
 	clientByID map[string]string
@@ -94,22 +100,16 @@ type manifestEntry struct {
 	Chunks []string `json:"chunks,omitempty"`
 }
 
-// Internal handler types
 type assetRoot struct {
 	prefix     string
 	fs         fs.FS
 	fileServer http.Handler
 }
 
-// Internal helper types
-type metaTag struct {
-	TagName  string
-	Name     string
-	Property string
-	Content  string
-	Rel      string
-	Href     string
-	Title    string
+type HeadTag struct {
+	Tag   string
+	Attrs map[string]string
+	Text  string
 }
 
 var (
@@ -121,7 +121,7 @@ var (
 type Config struct {
 	FS              fs.FS
 	DefaultTitle    string
-	DefaultMeta     []metaTag
+	DefaultMeta     []HeadTag
 	AppDir          string
 	PagesDir        string
 	DistDir         string
@@ -129,7 +129,24 @@ type Config struct {
 	RuntimePoolSize int
 }
 
+func loadEmbeddedAssets() {
+	polyfillsSource = mustReadAsset("assets/polyfills.js")
+	htmlTemplate = mustReadAsset("assets/html-template.html")
+	entryTemplate = mustReadAsset("assets/server-entry.tsx")
+	clientEntryTemplate = mustReadAsset("assets/client-entry.tsx")
+	renderTemplate = mustReadAsset("assets/render-invoke.js")
+}
+
+func mustReadAsset(path string) string {
+	data, err := assetsFS.ReadFile(path)
+	if err != nil {
+		panic(fmt.Sprintf("failed to load %s: %v", path, err))
+	}
+	return string(data)
+}
+
 func init() {
+	loadEmbeddedAssets()
 	renderTimeout.Store(defaultRenderTimeout)
 	jsPool = newRuntimePool(defaultRuntimePoolSize())
 	globalConfig.Store(&Config{
@@ -142,7 +159,6 @@ func init() {
 	})
 }
 
-// Init configures global settings for Alloy.
 func Init(filesystem fs.FS, options ...func(*Config)) {
 	cfg := &Config{
 		FS:              filesystem,
@@ -176,33 +192,28 @@ func getConfig() *Config {
 	return cfg
 }
 
-// PageHandler provides a fluent API for building page handlers.
 type PageHandler struct {
 	component string
 	loader    func(r *http.Request) map[string]any
 	ctx       func(r *http.Request) context.Context
 }
 
-// NewPage creates a new PageHandler for the given component path.
 func NewPage(component string) *PageHandler {
 	return &PageHandler{
 		component: component,
 	}
 }
 
-// WithLoader sets the loader function for this page.
 func (h *PageHandler) WithLoader(loader func(r *http.Request) map[string]any) *PageHandler {
 	h.loader = loader
 	return h
 }
 
-// WithContext sets a custom context function for this page.
 func (h *PageHandler) WithContext(ctx func(r *http.Request) context.Context) *PageHandler {
 	h.ctx = ctx
 	return h
 }
 
-// ServeHTTP implements http.Handler.
 func (h *PageHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cfg := getConfig()
 	if cfg == nil || cfg.FS == nil {
@@ -367,34 +378,6 @@ func currentRenderTimeout() time.Duration {
 	return timeout
 }
 
-const polyfillsSource = `
-		var globalThis = this;
-		var window = this;
-		var self = this;
-		var process = { env: { NODE_ENV: 'production' } };
-		var console = console || { log: function(){}, warn: function(){}, error: function(){}, info: function(){}, debug: function(){} };
-		var performance = performance || { now: function() { return Date.now(); } };
-
-		function TextEncoder() {}
-		TextEncoder.prototype.encode = function(str) {
-			var arr = [];
-			for (var i = 0; i < str.length; i++) {
-				var c = str.charCodeAt(i);
-				if (c < 128) arr.push(c);
-				else if (c < 2048) { arr.push(192 | (c >> 6)); arr.push(128 | (c & 63)); }
-				else { arr.push(224 | (c >> 12)); arr.push(128 | ((c >> 6) & 63)); arr.push(128 | (c & 63)); }
-			}
-			return new Uint8Array(arr);
-		};
-
-		function TextDecoder() {}
-		TextDecoder.prototype.decode = function(arr) {
-			var str = '';
-			for (var i = 0; i < arr.length; i++) str += String.fromCharCode(arr[i]);
-			return str;
-		};
-	`
-
 func loadPolyfills(ctx *quickjs.Context) error {
 	if ctx == nil {
 		return fmt.Errorf("context required")
@@ -408,7 +391,6 @@ func loadPolyfills(ctx *quickjs.Context) error {
 	return nil
 }
 
-// ServePage renders a TSX component and writes an HTML document.
 func ServePage(w http.ResponseWriter, r *http.Request, componentPath string, props map[string]any, rootID string) {
 	result, err := RenderTSXFileWithHydrationWithContext(r.Context(), componentPath, props, rootID)
 	if err != nil {
@@ -420,7 +402,6 @@ func ServePage(w http.ResponseWriter, r *http.Request, componentPath string, pro
 	fmt.Fprint(w, result.ToHTML(rootID))
 }
 
-// ServePageWithContext is like ServePage but uses a provided context for SSR timeouts.
 func ServePageWithContext(ctx context.Context, w http.ResponseWriter, r *http.Request, componentPath string, props map[string]any, rootID string) {
 	if ctx == nil {
 		ctx = r.Context()
@@ -435,7 +416,6 @@ func ServePageWithContext(ctx context.Context, w http.ResponseWriter, r *http.Re
 	fmt.Fprint(w, result.ToHTML(rootID))
 }
 
-// ServePrebuiltPage renders using prebuilt assets referenced by file paths.
 func ServePrebuiltPage(w http.ResponseWriter, r *http.Request, componentPath string, props map[string]any, rootID string, files PrebuiltFiles) {
 	result, err := RenderPrebuiltWithContext(r.Context(), componentPath, props, rootID, files)
 	if err != nil {
@@ -447,7 +427,6 @@ func ServePrebuiltPage(w http.ResponseWriter, r *http.Request, componentPath str
 	fmt.Fprint(w, result.ToHTML(rootID))
 }
 
-// RegisterPrebuiltBundle seeds the cache with prebuilt assets for production.
 func RegisterPrebuiltBundle(componentPath string, rootID string, serverJS string, clientJS string, css string) error {
 	if componentPath == "" || rootID == "" {
 		return fmt.Errorf("component path and root id required")
@@ -456,9 +435,9 @@ func RegisterPrebuiltBundle(componentPath string, rootID string, serverJS string
 		return fmt.Errorf("prebuilt assets cannot be empty")
 	}
 
-	absPath, err := filepath.Abs(componentPath)
+	absPath, err := resolveAbsPath(componentPath, "component path")
 	if err != nil {
-		return fmt.Errorf("resolve path: %w", err)
+		return err
 	}
 
 	bundleCache.Lock()
@@ -492,7 +471,6 @@ var bundleCache = struct {
 	entries: make(map[string]*bundleCacheEntry),
 }
 
-// ToHTML returns complete HTML document with hydration script
 func (r *RenderResult) ToHTML(rootID string) string {
 	if r.ClientJS == "" && r.ClientPath == "" && len(r.ClientPaths) == 0 {
 		return r.HTML
@@ -502,22 +480,11 @@ func (r *RenderResult) ToHTML(rootID string) string {
 	if err != nil {
 		propsJSON = []byte("{}")
 	}
-	metaTags := metaTagsFromProps(r.Props)
-	head := buildHead(metaTags)
+	head := buildHead(r.Props)
 	cssTag := r.buildCSSTag()
 	scriptTag := r.buildScriptTag()
 
-	return fmt.Sprintf(`<!DOCTYPE html>
-<html>
-<head>
-%s%s
-</head>
-<body>
-	<div id="%s">%s</div>
-	<script id="%s-props" type="application/json">%s</script>
-	%s
-</body>
-</html>`, head, cssTag, rootID, r.HTML, rootID, string(propsJSON), scriptTag)
+	return fmt.Sprintf(htmlTemplate, head, cssTag, rootID, r.HTML, rootID, string(propsJSON), scriptTag)
 }
 
 func (r *RenderResult) buildCSSTag() string {
@@ -559,170 +526,59 @@ func (r *RenderResult) buildScriptTag() string {
 	return ""
 }
 
-func buildHead(tags []metaTag) string {
+func buildHead(props map[string]any) string {
 	var b strings.Builder
 
-	b.WriteString("\t<meta charset=\"UTF-8\">")
+	b.WriteString("\t<meta charset=\"UTF-8\">\n")
+	b.WriteString("\t<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n")
 
-	hasViewport := false
-	hasTitle := false
+	title := stringFromMap(props, "title")
+	if title == "" {
+		title = "Alloy"
+	}
+	fmt.Fprintf(&b, "\t<title>%s</title>", html.EscapeString(title))
 
-	for _, tag := range tags {
-		if tag.Title != "" {
-			if !hasTitle {
-				escaped := html.EscapeString(tag.Title)
-				fmt.Fprintf(&b, "\n\t<title>%s</title>", escaped)
-				hasTitle = true
+	if meta, ok := props["meta"].([]any); ok {
+		for _, tag := range parseMetaTags(meta) {
+			fmt.Fprintf(&b, "\n\t<%s", tag.Tag)
+			for k, v := range tag.Attrs {
+				fmt.Fprintf(&b, " %s=\"%s\"", k, html.EscapeString(v))
 			}
-			continue
+			b.WriteString(">")
 		}
-
-		if tag.Name == "viewport" {
-			hasViewport = true
-		}
-
-		tagHTML := buildMetaTagHTML(tag)
-		if tagHTML != "" {
-			fmt.Fprintf(&b, "\n\t%s", tagHTML)
-		}
-	}
-
-	if !hasViewport {
-		b.WriteString("\n\t<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">")
-	}
-
-	if !hasTitle {
-		b.WriteString("\n\t<title>Alloy</title>")
 	}
 
 	return b.String()
 }
 
-func buildMetaTagHTML(tag metaTag) string {
-	tagName := tag.TagName
-	if tagName == "" {
-		if tag.Rel != "" || tag.Href != "" {
-			tagName = "link"
-		} else {
-			tagName = "meta"
-		}
-	}
-
-	var attrs []string
-	addAttr := func(name, val string) {
-		if val != "" {
-			attrs = append(attrs, fmt.Sprintf(`%s="%s"`, name, html.EscapeString(val)))
-		}
-	}
-	addAttr("name", tag.Name)
-	addAttr("property", tag.Property)
-	addAttr("content", tag.Content)
-	addAttr("rel", tag.Rel)
-	addAttr("href", tag.Href)
-	if len(attrs) == 0 {
-		return ""
-	}
-
-	sortMetaAttributes(attrs)
-
-	return fmt.Sprintf("<%s %s>", tagName, strings.Join(attrs, " "))
-}
-
-func sortMetaAttributes(attrs []string) {
-	priority := func(attr string) int {
-		if strings.HasPrefix(attr, "name=") {
-			return 0
-		}
-		if strings.HasPrefix(attr, "property=") {
-			return 1
-		}
-		return 2
-	}
-	sort.SliceStable(attrs, func(i, j int) bool {
-		pi, pj := priority(attrs[i]), priority(attrs[j])
-		if pi != pj {
-			return pi < pj
-		}
-		return attrs[i] < attrs[j]
-	})
-}
-
-func metaTagsFromProps(props map[string]any) []metaTag {
-	metaRaw, ok := props["meta"]
-	if !ok {
-		return buildDefaultMetaTags(props)
-	}
-
-	var tags []metaTag
-
-	switch v := metaRaw.(type) {
-	case []any:
-		tags = parseMetaArray(v)
-	case []map[string]any:
-		anySlice := make([]any, len(v))
-		for i, m := range v {
-			anySlice[i] = m
-		}
-		tags = parseMetaArray(anySlice)
-	default:
-		return buildDefaultMetaTags(props)
-	}
-
-	if len(tags) == 0 {
-		return buildDefaultMetaTags(props)
-	}
-
-	return tags
-}
-
-func parseMetaArray(metaArray []any) []metaTag {
-	tags := make([]metaTag, 0, len(metaArray))
-	for _, item := range metaArray {
-		itemMap, ok := item.(map[string]any)
+func parseMetaTags(meta []any) []HeadTag {
+	var tags []HeadTag
+	for _, item := range meta {
+		m, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
 
-		tag := metaTag{
-			TagName:  stringFromMap(itemMap, "tagName"),
-			Name:     stringFromMap(itemMap, "name"),
-			Property: stringFromMap(itemMap, "property"),
-			Content:  stringFromMap(itemMap, "content"),
-			Rel:      stringFromMap(itemMap, "rel"),
-			Href:     stringFromMap(itemMap, "href"),
-			Title:    stringFromMap(itemMap, "title"),
+		tag := stringFromMap(m, "tag")
+		if tag == "" {
+			tag = "meta"
 		}
 
-		if !isValidMetaTag(tag) {
-			continue
+		attrs := make(map[string]string)
+		for k, v := range m {
+			if k == "tag" {
+				continue
+			}
+			if s, ok := v.(string); ok {
+				attrs[k] = s
+			}
 		}
 
-		tags = append(tags, tag)
+		if len(attrs) > 0 {
+			tags = append(tags, HeadTag{Tag: tag, Attrs: attrs})
+		}
 	}
-
 	return tags
-}
-
-func buildDefaultMetaTags(props map[string]any) []metaTag {
-	title := stringFromMap(props, "title")
-	if title == "" {
-		title = "Alloy"
-	}
-
-	return []metaTag{
-		{Title: title},
-		{Name: "viewport", Content: "width=device-width, initial-scale=1.0"},
-	}
-}
-
-func isValidMetaTag(tag metaTag) bool {
-	if tag.Title != "" || (tag.Name != "" && tag.Content != "") || (tag.Property != "" && tag.Content != "") || (tag.Rel != "" && tag.Href != "") {
-		return true
-	}
-	if tag.TagName != "" {
-		return tag.Name != "" || tag.Property != "" || tag.Content != "" || tag.Rel != "" || tag.Href != ""
-	}
-	return false
 }
 
 func stringFromMap(m map[string]any, key string) string {
@@ -730,16 +586,14 @@ func stringFromMap(m map[string]any, key string) string {
 	return str
 }
 
-// RenderTSXFileWithHydration renders with client-side hydration support
 func RenderTSXFileWithHydration(filePath string, props map[string]any, rootID string) (*RenderResult, error) {
 	return RenderTSXFileWithHydrationWithContext(context.Background(), filePath, props, rootID)
 }
 
-// RenderTSXFileWithHydrationWithContext renders with hydration using a custom context.
 func RenderTSXFileWithHydrationWithContext(ctx context.Context, filePath string, props map[string]any, rootID string) (*RenderResult, error) {
-	absPath, err := filepath.Abs(filePath)
+	absPath, err := resolveAbsPath(filePath, "component path")
 	if err != nil {
-		return nil, fmt.Errorf("resolve component path %s: %w", filePath, err)
+		return nil, err
 	}
 
 	if _, err := os.Stat(absPath); err != nil {
@@ -764,20 +618,18 @@ func RenderTSXFileWithHydrationWithContext(ctx context.Context, filePath string,
 	}, nil
 }
 
-// RenderPrebuilt renders using prebuilt assets referenced by paths (for production).
 func RenderPrebuilt(filePath string, props map[string]any, rootID string, files PrebuiltFiles) (*RenderResult, error) {
 	return RenderPrebuiltWithContext(context.Background(), filePath, props, rootID, files)
 }
 
-// RenderPrebuiltWithContext renders using prebuilt assets with a custom context.
 func RenderPrebuiltWithContext(ctx context.Context, filePath string, props map[string]any, rootID string, files PrebuiltFiles) (*RenderResult, error) {
 	if files.Server == "" || files.Client == "" || files.CSS == "" {
 		return nil, fmt.Errorf("prebuilt file paths required")
 	}
 
-	absPath, err := filepath.Abs(filePath)
+	absPath, err := resolveAbsPath(filePath, "component path")
 	if err != nil {
-		return nil, fmt.Errorf("resolve component path %s: %w", filePath, err)
+		return nil, err
 	}
 
 	serverJS, clientJS, css := readBundlesFromCache(absPath, rootID)
@@ -800,11 +652,18 @@ func RenderPrebuiltWithContext(ctx context.Context, filePath string, props map[s
 	}, nil
 }
 
-// BuildServerBundle builds only the server bundle for a component.
+func generateServerEntryCode(componentPath string) string {
+	return fmt.Sprintf(entryTemplate, componentPath)
+}
+
+func generateClientEntryCode(componentPath, rootID string) string {
+	return fmt.Sprintf(clientEntryTemplate, componentPath, rootID, rootID)
+}
+
 func BuildServerBundle(filePath string) (string, []string, error) {
-	absPath, err := filepath.Abs(filePath)
+	absPath, err := resolveAbsPath(filePath, "component path")
 	if err != nil {
-		return "", nil, fmt.Errorf("resolve component path %s: %w", filePath, err)
+		return "", nil, err
 	}
 	if _, err := os.Stat(absPath); err != nil {
 		return "", nil, fmt.Errorf("component not found %s: %w", absPath, err)
@@ -816,41 +675,25 @@ func BuildServerBundle(filePath string) (string, []string, error) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	entryCode := fmt.Sprintf(`
-import { renderToString } from 'react-dom/server.edge';
-import Component from '%s';
-
-export default function render(props: any) {
-	return renderToString(<Component {...props} />);
-}
-	`, absPath)
+	entryCode := generateServerEntryCode(absPath)
 
 	entryPath := filepath.Join(tmpDir, "entry.tsx")
 	if err := os.WriteFile(entryPath, []byte(entryCode), 0644); err != nil {
 		return "", nil, err
 	}
 
-	cwd, _ := os.Getwd()
+	opts := commonBuildOptions()
+	opts.EntryPoints = []string{entryPath}
+	opts.Write = false
+	opts.Metafile = true
+	opts.Format = api.FormatIIFE
+	opts.GlobalName = "__Component"
+	opts.Platform = api.PlatformBrowser
 
-	result := api.Build(api.BuildOptions{
-		EntryPoints:      []string{entryPath},
-		Bundle:           true,
-		Write:            false,
-		Metafile:         true,
-		Format:           api.FormatIIFE,
-		GlobalName:       "__Component",
-		MinifyWhitespace: true,
-		MinifySyntax:     true,
-		Target:           api.ES2020,
-		JSX:              api.JSXAutomatic,
-		JSXImportSource:  "react",
-		NodePaths:        []string{filepath.Join(cwd, "node_modules")},
-		Platform:         api.PlatformBrowser,
-		MainFields:       []string{"browser", "module", "main"},
-	})
+	result := api.Build(opts)
 
-	if len(result.Errors) > 0 {
-		return "", nil, fmt.Errorf("esbuild server bundle %s: %s", absPath, result.Errors[0].Text)
+	if err := checkBuildErrors(result, fmt.Sprintf("esbuild server bundle %s", absPath)); err != nil {
+		return "", nil, err
 	}
 
 	if len(result.OutputFiles) == 0 {
@@ -873,39 +716,45 @@ func writeManifestEntry(dir string, name string, files *PrebuiltFiles) error {
 	}
 
 	path := filepath.Join(dir, "manifest.json")
+	updates := map[string]manifestEntry{
+		name: {
+			Server: filepath.Base(files.Server),
+			Client: filepath.Base(files.Client),
+			CSS:    filepath.Base(files.CSS),
+			Chunks: baseNames(files.ClientChunks),
+		},
+	}
 
+	return updateManifest(path, updates)
+}
+
+func updateManifest(manifestPath string, updates map[string]manifestEntry) error {
 	manifest := map[string]manifestEntry{}
-	if data, err := os.ReadFile(path); err == nil {
+
+	if data, err := os.ReadFile(manifestPath); err == nil {
 		if err := json.Unmarshal(data, &manifest); err != nil {
 			return fmt.Errorf("decode manifest: %w", err)
 		}
 	}
 
-	manifest[name] = manifestEntry{
-		Server: filepath.Base(files.Server),
-		Client: filepath.Base(files.Client),
-		CSS:    filepath.Base(files.CSS),
-		Chunks: baseNames(files.ClientChunks),
-	}
+	maps.Copy(manifest, updates)
 
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode manifest: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(manifestPath, data, 0644); err != nil {
 		return fmt.Errorf("write manifest file: %w", err)
 	}
 
 	return nil
 }
 
-// WriteManifest writes or updates manifest.json with provided files.
 func WriteManifest(dir string, name string, files PrebuiltFiles) error {
 	return writeManifestEntry(dir, name, &files)
 }
 
-// SaveServerBundle writes only the server bundle.
 func SaveServerBundle(serverJS string, dir string, name string) (*PrebuiltFiles, error) {
 	if serverJS == "" {
 		return nil, fmt.Errorf("server required")
@@ -931,7 +780,6 @@ func SaveServerBundle(serverJS string, dir string, name string) (*PrebuiltFiles,
 	return files, nil
 }
 
-// SaveCSS writes a CSS bundle to disk.
 func SaveCSS(css string, dir string, name string) (string, error) {
 	if css == "" {
 		return "", fmt.Errorf("css required")
@@ -972,8 +820,6 @@ func baseNames(paths []string) []string {
 	return out
 }
 
-// RegisterPrebuiltBundleFromFS reads assets from an fs.FS and registers them.
-// If files are not found in the provided filesystem, falls back to OS filesystem for dev mode.
 func RegisterPrebuiltBundleFromFS(componentPath string, rootID string, filesystem fs.FS, files PrebuiltFiles) error {
 	if filesystem == nil {
 		return fmt.Errorf("filesystem required")
@@ -1087,7 +933,6 @@ func addCacheHeaders(w http.ResponseWriter, assetPath string, root assetRoot, re
 	}
 }
 
-// BuildClientBundles bundles multiple client entries with code splitting.
 func BuildClientBundles(entries []ClientEntry, outDir string) (map[string]ClientAssets, error) {
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("entries required")
@@ -1096,9 +941,9 @@ func BuildClientBundles(entries []ClientEntry, outDir string) (map[string]Client
 		return nil, fmt.Errorf("out dir required")
 	}
 
-	absOut, err := filepath.Abs(outDir)
+	absOut, err := resolveAbsPath(outDir, "out dir")
 	if err != nil {
-		return nil, fmt.Errorf("resolve out dir: %w", err)
+		return nil, err
 	}
 	if err := os.MkdirAll(absOut, 0755); err != nil {
 		return nil, fmt.Errorf("make out dir: %w", err)
@@ -1121,23 +966,12 @@ func BuildClientBundles(entries []ClientEntry, outDir string) (map[string]Client
 			rootID = defaultRootID(e.Component)
 		}
 
-		absPath, err := filepath.Abs(e.Component)
+		absPath, err := resolveAbsPath(e.Component, fmt.Sprintf("entry %s", e.Name))
 		if err != nil {
-			return nil, fmt.Errorf("resolve entry %s: %w", e.Name, err)
+			return nil, err
 		}
 
-		wrapper := fmt.Sprintf(`
-import { hydrateRoot } from 'react-dom/client';
-import Component from '%s';
-
-const propsEl = document.getElementById('%s-props');
-const props = propsEl ? JSON.parse(propsEl.textContent || '{}') : {};
-const rootEl = document.getElementById('%s');
-
-if (rootEl) {
-	hydrateRoot(rootEl, <Component {...props} />);
-}
-`, absPath, rootID, rootID)
+		wrapper := generateClientEntryCode(absPath, rootID)
 
 		entryPath := filepath.Join(tmpDir, e.Name+".tsx")
 		if err := os.WriteFile(entryPath, []byte(wrapper), 0644); err != nil {
@@ -1153,27 +987,20 @@ if (rootEl) {
 
 	cwd, _ := os.Getwd()
 
-	result := api.Build(api.BuildOptions{
-		EntryPointsAdvanced: toEntryPoints(entryPoints),
-		Outdir:              absOut,
-		Bundle:              true,
-		Splitting:           true,
-		Format:              api.FormatESModule,
-		Write:               true,
-		Metafile:            true,
-		JSX:                 api.JSXAutomatic,
-		JSXImportSource:     "react",
-		MainFields:          []string{"browser", "module", "main"},
-		Target:              api.ES2020,
-		EntryNames:          "client-[name]-[hash]",
-		ChunkNames:          "chunk-[hash]",
-		MinifyWhitespace:    true,
-		MinifySyntax:        true,
-		NodePaths:           []string{filepath.Join(cwd, "node_modules")},
-	})
+	opts := commonBuildOptions()
+	opts.EntryPointsAdvanced = toEntryPoints(entryPoints)
+	opts.Outdir = absOut
+	opts.Splitting = true
+	opts.Format = api.FormatESModule
+	opts.Write = true
+	opts.Metafile = true
+	opts.EntryNames = "client-[name]-[hash]"
+	opts.ChunkNames = "chunk-[hash]"
 
-	if len(result.Errors) > 0 {
-		return nil, fmt.Errorf("client build error: %s", result.Errors[0].Text)
+	result := api.Build(opts)
+
+	if err := checkBuildErrors(result, "client build error"); err != nil {
+		return nil, err
 	}
 
 	var meta struct {
@@ -1266,6 +1093,39 @@ func toEntryPoints(entries map[string]ClientEntry) []api.EntryPoint {
 	return out
 }
 
+func commonBuildOptions() api.BuildOptions {
+	cwd, _ := os.Getwd()
+	return api.BuildOptions{
+		Bundle:           true,
+		JSX:              api.JSXAutomatic,
+		JSXImportSource:  "react",
+		Target:           api.ES2020,
+		MainFields:       []string{"browser", "module", "main"},
+		NodePaths:        []string{filepath.Join(cwd, "node_modules")},
+		MinifyWhitespace: true,
+		MinifySyntax:     true,
+	}
+}
+
+func disableMinify(opts *api.BuildOptions) {
+	opts.MinifyWhitespace = false
+	opts.MinifySyntax = false
+}
+
+func checkBuildErrors(result api.BuildResult, context string) error {
+	if len(result.Errors) > 0 {
+		return fmt.Errorf("%s: %s", context, result.Errors[0].Text)
+	}
+	return nil
+}
+
+func checkContextError(err error, context string) error {
+	if ctxErr, ok := err.(*api.ContextError); ok && ctxErr != nil {
+		return fmt.Errorf("%s: %v", context, err)
+	}
+	return nil
+}
+
 func collectAssetRoots(filesystem fs.FS) []assetRoot {
 	var roots []assetRoot
 
@@ -1291,15 +1151,15 @@ func collectAssetRoots(filesystem fs.FS) []assetRoot {
 func isHashedAsset(assetPath string) bool {
 	base := filepath.Base(assetPath)
 	name := strings.TrimSuffix(base, filepath.Ext(base))
-	parts := strings.Split(name, "-")
-	for _, part := range parts {
+	parts := strings.SplitSeq(name, "-")
+	for part := range parts {
 		if len(part) < 8 {
 			continue
 		}
 		allAlphaNum := true
 		hasDigit := false
 		for _, r := range part {
-			if (r >= '0' && r <= '9') {
+			if r >= '0' && r <= '9' {
 				hasDigit = true
 			} else if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')) {
 				allAlphaNum = false
@@ -1340,6 +1200,19 @@ func ensureLeadingSlash(p string) string {
 		return p
 	}
 	return "/" + p
+}
+
+func resolveAbsPath(path, context string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", context, err)
+	}
+	return abs, nil
+}
+
+func mustResolveAbsPath(path string) string {
+	abs, _ := filepath.Abs(path)
+	return abs
 }
 
 func resolvePrebuiltFiles(filesystem fs.FS, component string, distDir string, name string) (PrebuiltFiles, error) {
@@ -1502,14 +1375,12 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-// PageSpec defines a page component for building.
 type PageSpec struct {
 	Component string
 	Name      string
 	RootID    string
 }
 
-// BuildDevBundles performs initial dev build of all bundles.
 func BuildDevBundles(pages []PageSpec, distDir string) error {
 	if len(pages) == 0 {
 		return fmt.Errorf("no pages provided")
@@ -1517,8 +1388,6 @@ func BuildDevBundles(pages []PageSpec, distDir string) error {
 	if distDir == "" {
 		return fmt.Errorf("distDir required")
 	}
-
-	cwd, _ := os.Getwd()
 
 	for _, page := range pages {
 		serverJS, _, err := BuildServerBundle(page.Component)
@@ -1540,23 +1409,12 @@ func BuildDevBundles(pages []PageSpec, distDir string) error {
 
 	clientEntries := make([]api.EntryPoint, 0, len(pages))
 	for _, page := range pages {
-		absComponent, err := filepath.Abs(page.Component)
+		absComponent, err := resolveAbsPath(page.Component, "component path")
 		if err != nil {
-			return fmt.Errorf("resolve component path: %w", err)
+			return err
 		}
 
-		wrapperCode := fmt.Sprintf(`
-import { hydrateRoot } from 'react-dom/client';
-import Component from '%s';
-
-const propsEl = document.getElementById('%s-props');
-const props = propsEl ? JSON.parse(propsEl.textContent || '{}') : {};
-const rootEl = document.getElementById('%s');
-
-if (rootEl) {
-	hydrateRoot(rootEl, <Component {...props} />);
-}
-		`, absComponent, page.RootID, page.RootID)
+		wrapperCode := generateClientEntryCode(absComponent, page.RootID)
 
 		entryPath := filepath.Join(tmpClientDir, page.Name+".tsx")
 		if err := os.WriteFile(entryPath, []byte(wrapperCode), 0644); err != nil {
@@ -1569,26 +1427,20 @@ if (rootEl) {
 		})
 	}
 
-	result := api.Build(api.BuildOptions{
-		EntryPointsAdvanced: clientEntries,
-		Outdir:              distDir,
-		Bundle:              true,
-		Splitting:           true,
-		Format:              api.FormatESModule,
-		Write:               true,
-		JSX:                 api.JSXAutomatic,
-		JSXImportSource:     "react",
-		MainFields:          []string{"browser", "module", "main"},
-		Target:              api.ES2020,
-		EntryNames:          "[name]-client",
-		ChunkNames:          "chunk-[hash]",
-		MinifyWhitespace:    false,
-		MinifySyntax:        false,
-		NodePaths:           []string{filepath.Join(cwd, "node_modules")},
-	})
+	opts := commonBuildOptions()
+	opts.EntryPointsAdvanced = clientEntries
+	opts.Outdir = distDir
+	opts.Splitting = true
+	opts.Format = api.FormatESModule
+	opts.Write = true
+	opts.EntryNames = "[name]-client"
+	opts.ChunkNames = "chunk-[hash]"
+	disableMinify(&opts)
 
-	if len(result.Errors) > 0 {
-		return fmt.Errorf("build client: %s", result.Errors[0].Text)
+	result := api.Build(opts)
+
+	if err := checkBuildErrors(result, "build client"); err != nil {
+		return err
 	}
 
 	if err := writeDevManifest(pages, distDir); err != nil {
@@ -1600,45 +1452,38 @@ if (rootEl) {
 
 func writeDevManifest(pages []PageSpec, distDir string) error {
 	manifestPath := filepath.Join(distDir, "manifest.json")
-	manifest := make(map[string]map[string]any)
 
+	existingManifest := map[string]manifestEntry{}
+	if data, err := os.ReadFile(manifestPath); err == nil {
+		json.Unmarshal(data, &existingManifest)
+	}
+
+	updates := make(map[string]manifestEntry, len(pages))
 	for _, page := range pages {
-		manifest[page.Name] = map[string]any{
-			"server": fmt.Sprintf("%s-server.js", page.Name),
-			"client": fmt.Sprintf("%s-client.js", page.Name),
-			"css":    "shared.css",
+		updates[page.Name] = manifestEntry{
+			Server: fmt.Sprintf("%s-server.js", page.Name),
+			Client: fmt.Sprintf("%s-client.js", page.Name),
+			CSS:    "shared.css",
 		}
 	}
 
-	data, err := os.ReadFile(manifestPath)
-	if err == nil {
-		var existing map[string]map[string]any
-		if err := json.Unmarshal(data, &existing); err == nil {
-			for name, entry := range existing {
-				if _, ok := manifest[name]; !ok {
-					manifest[name] = entry
-				}
-			}
+	for name, entry := range existingManifest {
+		if _, exists := updates[name]; !exists {
+			updates[name] = entry
 		}
 	}
 
-	manifestData, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(manifestPath, manifestData, 0644)
+	return updateManifest(manifestPath, updates)
 }
 
-// WatchTailwind runs Tailwind in watch mode.
 func WatchTailwind(ctx context.Context, inputPath, outputPath, cwd string) *exec.Cmd {
 	runner, baseArgs := ResolveTailwindRunner(cwd)
 	if runner == "" {
 		return nil
 	}
 
-	absInput, _ := filepath.Abs(inputPath)
-	absOutput, _ := filepath.Abs(outputPath)
+	absInput := mustResolveAbsPath(inputPath)
+	absOutput := mustResolveAbsPath(outputPath)
 
 	args := append(baseArgs, "-i", absInput, "-o", absOutput, "--watch=always")
 
@@ -1650,7 +1495,6 @@ func WatchTailwind(ctx context.Context, inputPath, outputPath, cwd string) *exec
 	return cmd
 }
 
-// WatchAndBuild watches for changes and rebuilds bundles in dev mode.
 func WatchAndBuild(ctx context.Context, pages []PageSpec, distDir string, buildDone chan<- struct{}) error {
 	cssPath := filepath.Join(DefaultAppDir, "app.css")
 	cwd, _ := os.Getwd()
@@ -1660,7 +1504,7 @@ func WatchAndBuild(ctx context.Context, pages []PageSpec, distDir string, buildD
 	}
 
 	logger := NewLogger()
-	logger.Success(fmt.Sprintf("Initial build complete: %d pages", len(pages)))
+	logger.Success("Initial build complete")
 
 	if buildDone != nil {
 		close(buildDone)
@@ -1681,19 +1525,12 @@ func WatchAndBuild(ctx context.Context, pages []PageSpec, distDir string, buildD
 	serverCtxs := make([]serverCtxInfo, 0, len(pages))
 
 	for _, page := range pages {
-		absComponent, err := filepath.Abs(page.Component)
+		absComponent, err := resolveAbsPath(page.Component, "component path")
 		if err != nil {
-			return fmt.Errorf("resolve component path: %w", err)
+			return err
 		}
 
-		entryCode := fmt.Sprintf(`
-import { renderToString } from 'react-dom/server.edge';
-import Component from '%s';
-
-export default function render(props: any) {
-	return renderToString(<Component {...props} />);
-}
-		`, absComponent)
+		entryCode := generateServerEntryCode(absComponent)
 
 		entryPath := filepath.Join(serverTmpDir, page.Name+"-entry.tsx")
 		if err := os.WriteFile(entryPath, []byte(entryCode), 0644); err != nil {
@@ -1702,25 +1539,18 @@ export default function render(props: any) {
 
 		outPath := filepath.Join(distDir, fmt.Sprintf("%s-server.js", page.Name))
 
-		buildCtx, err := api.Context(api.BuildOptions{
-			EntryPoints:      []string{entryPath},
-			Bundle:           true,
-			Write:            true,
-			Outfile:          outPath,
-			Format:           api.FormatIIFE,
-			GlobalName:       "__Component",
-			Target:           api.ES2020,
-			JSX:              api.JSXAutomatic,
-			JSXImportSource:  "react",
-			NodePaths:        []string{filepath.Join(cwd, "node_modules")},
-			Platform:         api.PlatformBrowser,
-			MainFields:       []string{"browser", "module", "main"},
-			MinifyWhitespace: false,
-			MinifySyntax:     false,
-		})
+		opts := commonBuildOptions()
+		opts.EntryPoints = []string{entryPath}
+		opts.Write = true
+		opts.Outfile = outPath
+		opts.Format = api.FormatIIFE
+		opts.GlobalName = "__Component"
+		opts.Platform = api.PlatformBrowser
+		disableMinify(&opts)
 
-		if ctxErr, ok := err.(*api.ContextError); ok && ctxErr != nil {
-			return fmt.Errorf("create server context %s: %v", page.Name, err)
+		buildCtx, err := api.Context(opts)
+		if err := checkContextError(err, fmt.Sprintf("create server context %s", page.Name)); err != nil {
+			return err
 		}
 
 		serverCtxs = append(serverCtxs, serverCtxInfo{ctx: buildCtx, tmp: entryPath})
@@ -1744,13 +1574,6 @@ export default function render(props: any) {
 		}
 	}()
 
-	go func() {
-		<-ctx.Done()
-		for _, info := range serverCtxs {
-			info.ctx.Dispose()
-		}
-	}()
-
 	tmpClientDir, err := os.MkdirTemp("", "alloy-client-")
 	if err != nil {
 		return fmt.Errorf("create client temp: %w", err)
@@ -1759,23 +1582,12 @@ export default function render(props: any) {
 
 	clientEntries := make([]api.EntryPoint, 0, len(pages))
 	for _, page := range pages {
-		absComponent, err := filepath.Abs(page.Component)
+		absComponent, err := resolveAbsPath(page.Component, "component path")
 		if err != nil {
-			return fmt.Errorf("resolve component path: %w", err)
+			return err
 		}
 
-		wrapperCode := fmt.Sprintf(`
-import { hydrateRoot } from 'react-dom/client';
-import Component from '%s';
-
-const propsEl = document.getElementById('%s-props');
-const props = propsEl ? JSON.parse(propsEl.textContent || '{}') : {};
-const rootEl = document.getElementById('%s');
-
-if (rootEl) {
-	hydrateRoot(rootEl, <Component {...props} />);
-}
-		`, absComponent, page.RootID, page.RootID)
+		wrapperCode := generateClientEntryCode(absComponent, page.RootID)
 
 		entryPath := filepath.Join(tmpClientDir, page.Name+".tsx")
 		if err := os.WriteFile(entryPath, []byte(wrapperCode), 0644); err != nil {
@@ -1788,32 +1600,21 @@ if (rootEl) {
 		})
 	}
 
-	clientCtx, err := api.Context(api.BuildOptions{
-		EntryPointsAdvanced: clientEntries,
-		Outdir:              distDir,
-		Bundle:              true,
-		Splitting:           true,
-		Format:              api.FormatESModule,
-		Write:               true,
-		JSX:                 api.JSXAutomatic,
-		JSXImportSource:     "react",
-		MainFields:          []string{"browser", "module", "main"},
-		Target:              api.ES2020,
-		EntryNames:          "[name]-client",
-		ChunkNames:          "chunk-[hash]",
-		MinifyWhitespace:    false,
-		MinifySyntax:        false,
-		NodePaths:           []string{filepath.Join(cwd, "node_modules")},
-	})
-	if ctxErr, ok := err.(*api.ContextError); ok && ctxErr != nil {
-		return fmt.Errorf("create client context: %v", err)
+	opts := commonBuildOptions()
+	opts.EntryPointsAdvanced = clientEntries
+	opts.Outdir = distDir
+	opts.Splitting = true
+	opts.Format = api.FormatESModule
+	opts.Write = true
+	opts.EntryNames = "[name]-client"
+	opts.ChunkNames = "chunk-[hash]"
+	disableMinify(&opts)
+
+	clientCtx, err := api.Context(opts)
+	if err := checkContextError(err, "create client context"); err != nil {
+		return err
 	}
 	defer clientCtx.Dispose()
-
-	go func() {
-		<-ctx.Done()
-		clientCtx.Dispose()
-	}()
 
 	g.Go(func() error {
 		err := clientCtx.Watch(api.WatchOptions{})
@@ -1852,7 +1653,6 @@ if (rootEl) {
 	return g.Wait()
 }
 
-// DiscoverPages finds all .tsx files in a directory.
 func DiscoverPages(dir string) ([]PageSpec, error) {
 	pattern := filepath.Join(dir, "*.tsx")
 	matches, err := filepath.Glob(pattern)
@@ -1889,7 +1689,6 @@ func readBundlesFromCache(path string, rootID string) (string, string, string) {
 	return "", "", ""
 }
 
-// executeSSR runs the JS code in QuickJS using the runtime pool.
 func executeSSR(ctx context.Context, jsCode string, props map[string]any) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1939,12 +1738,7 @@ func runSSR(ctx *quickjs.Context, jsCode string, props map[string]any) (string, 
 		return "", fmt.Errorf("marshal props: %w", err)
 	}
 
-	renderCode := fmt.Sprintf(`
-			(function() {
-				var render = __Component.default || __Component;
-				return render(%s);
-			})()
-		`, string(propsJSON))
+	renderCode := fmt.Sprintf(renderTemplate, string(propsJSON))
 
 	renderResult := ctx.Eval(renderCode)
 	defer renderResult.Free()
@@ -1992,7 +1786,6 @@ func filterOutPath(paths []string, skip string) []string {
 	return filtered
 }
 
-// ServePrebuiltPageWithContext is like ServePrebuiltPage but uses a provided context for SSR timeouts.
 func ServePrebuiltPageWithContext(ctx context.Context, w http.ResponseWriter, r *http.Request, componentPath string, props map[string]any, rootID string, files PrebuiltFiles) {
 	if ctx == nil {
 		ctx = r.Context()
