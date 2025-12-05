@@ -135,6 +135,51 @@ type PageSpec struct {
 	RootID    string
 }
 
+func AssetsMiddleware() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			cfg := getConfig()
+			if cfg.FS != nil && serveAsset(w, r, cfg.FS) {
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func serveAsset(w http.ResponseWriter, r *http.Request, filesystem fs.FS) bool {
+	isAllowedMethod := r.Method == http.MethodGet || r.Method == http.MethodHead
+	if !isAllowedMethod {
+		return false
+	}
+
+	assetPath := normalizeAssetPath(r.URL.Path)
+	if assetPath == "" {
+		return false
+	}
+
+	roots := collectAssetRoots(filesystem)
+	for _, root := range roots {
+		rel, ok := root.match(assetPath)
+		if !ok {
+			continue
+		}
+		if !root.assetExists(rel) {
+			continue
+		}
+
+		fullPath := assetPath
+		if root.prefix != "" {
+			fullPath = path.Join(root.prefix, rel)
+		}
+		addCacheHeaders(w, fullPath, root, rel)
+		root.serve(w, r, rel)
+		return true
+	}
+
+	return false
+}
+
 func init() {
 	loadEmbeddedAssets()
 	renderTimeout.Store(defaultRenderTimeout)
@@ -205,11 +250,6 @@ func (h *PageHandler) WithLoader(loader func(r *http.Request) map[string]any) *P
 
 func (h *PageHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cfg := getConfig()
-
-	if tryServeAsset(w, r, cfg.FS) {
-		return
-	}
-
 	rootID := defaultRootID(h.component)
 	props := map[string]any{}
 	if h.loader != nil {
@@ -232,39 +272,6 @@ func (h *PageHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ServePageWithContext(w, r, h.component, props, rootID)
-}
-
-func tryServeAsset(w http.ResponseWriter, r *http.Request, filesystem fs.FS) bool {
-	isAllowedMethod := r.Method == http.MethodGet || r.Method == http.MethodHead
-	if !isAllowedMethod {
-		return false
-	}
-
-	assetPath := normalizeAssetPath(r.URL.Path)
-	if assetPath == "" {
-		return false
-	}
-
-	roots := collectAssetRoots(filesystem)
-	for _, root := range roots {
-		rel, ok := root.match(assetPath)
-		if !ok {
-			continue
-		}
-		if !root.assetExists(rel) {
-			continue
-		}
-
-		fullPath := assetPath
-		if root.prefix != "" {
-			fullPath = path.Join(root.prefix, rel)
-		}
-		addCacheHeaders(w, fullPath, root, rel)
-		root.serve(w, r, rel)
-		return true
-	}
-
-	return false
 }
 
 func newRuntimeWithContext() (*jsRuntime, error) {

@@ -2,7 +2,7 @@ package main
 
 import (
 	"embed"
-	"log"
+	"fmt"
 	"net/http"
 
 	"github.com/3-lines-studio/alloy"
@@ -19,6 +19,8 @@ func main() {
 	mux.Handle("/", alloy.NewPage("app/pages/home.tsx").WithLoader(loader.Home))
 	mux.Handle("/{slug}", alloy.NewPage("app/pages/docs.tsx").WithLoader(loader.Docs))
 
-	log.Println("Running @ http://localhost:8080")
-	log.Fatal(http.ListenAndServe(":8080", mux))
+	handler := alloy.AssetsMiddleware()(mux)
+	http.ListenAndServe(":8080", handler)
+
+	fmt.Println("Running @ http://localhost:8080")
 }
