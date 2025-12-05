@@ -206,10 +206,10 @@ Static files served directly at root path.
 
 ```
 public/
-├── favicon.ico        → Served at /favicon.ico
-├── robots.txt         → Served at /robots.txt
+├── favicon.ico        ➡️ Served at /favicon.ico
+├── robots.txt         ➡️ Served at /robots.txt
 └── images/
-    └── logo.png       → Served at /images/logo.png
+    └── logo.png       ➡️ Served at /images/logo.png
 ```
 
 Embed in binary with `//go:embed`:
@@ -252,7 +252,7 @@ myapp/
 └── public/
 ```
 
-Works with `alloy -pages pages`.
+Works with `alloy --pages pages`.
 
 ### Monorepo
 

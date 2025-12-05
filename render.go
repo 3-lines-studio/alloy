@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"io/fs"
 	"maps"
 	"net/http"
@@ -16,7 +17,6 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,7 +37,6 @@ var (
 	clientEntryTemplate string
 	renderTemplate      string
 	renderTimeout       atomic.Value
-	jsPool              *runtimePool
 	globalConfig        atomic.Value
 )
 
@@ -54,11 +53,6 @@ const (
 type jsRuntime struct {
 	rt  *quickjs.Runtime
 	ctx *quickjs.Context
-}
-
-type runtimePool struct {
-	sem  chan struct{}
-	size int
 }
 
 type bundleCacheEntry struct {
@@ -121,14 +115,13 @@ type HeadTag struct {
 }
 
 type Config struct {
-	FS              fs.FS
-	DefaultTitle    string
-	DefaultMeta     []HeadTag
-	AppDir          string
-	PagesDir        string
-	DistDir         string
-	RenderTimeout   time.Duration
-	RuntimePoolSize int
+	FS            fs.FS
+	DefaultTitle  string
+	DefaultMeta   []HeadTag
+	AppDir        string
+	PagesDir      string
+	DistDir       string
+	RenderTimeout time.Duration
 }
 
 type PageHandler struct {
@@ -146,14 +139,12 @@ type PageSpec struct {
 func init() {
 	loadEmbeddedAssets()
 	renderTimeout.Store(defaultRenderTimeout)
-	jsPool = newRuntimePool(defaultRuntimePoolSize())
 	globalConfig.Store(&Config{
-		DefaultTitle:    "Alloy",
-		AppDir:          DefaultAppDir,
-		PagesDir:        DefaultPagesDir,
-		DistDir:         DefaultDistDir,
-		RenderTimeout:   defaultRenderTimeout,
-		RuntimePoolSize: defaultRuntimePoolSize(),
+		DefaultTitle:  "Alloy",
+		AppDir:        DefaultAppDir,
+		PagesDir:      DefaultPagesDir,
+		DistDir:       DefaultDistDir,
+		RenderTimeout: defaultRenderTimeout,
 	})
 }
 
@@ -175,13 +166,12 @@ func mustReadAsset(path string) string {
 
 func Init(filesystem fs.FS, options ...func(*Config)) {
 	cfg := &Config{
-		FS:              filesystem,
-		DefaultTitle:    "Alloy",
-		AppDir:          DefaultAppDir,
-		PagesDir:        DefaultPagesDir,
-		DistDir:         DefaultDistDir,
-		RenderTimeout:   defaultRenderTimeout,
-		RuntimePoolSize: defaultRuntimePoolSize(),
+		FS:            filesystem,
+		DefaultTitle:  "Alloy",
+		AppDir:        DefaultAppDir,
+		PagesDir:      DefaultPagesDir,
+		DistDir:       DefaultDistDir,
+		RenderTimeout: defaultRenderTimeout,
 	}
 
 	for _, opt := range options {
@@ -192,10 +182,6 @@ func Init(filesystem fs.FS, options ...func(*Config)) {
 
 	if cfg.RenderTimeout > 0 {
 		renderTimeout.Store(cfg.RenderTimeout)
-	}
-
-	if cfg.RuntimePoolSize > 0 {
-		jsPool = newRuntimePool(cfg.RuntimePoolSize)
 	}
 
 	globalConfig.Store(cfg)
@@ -281,56 +267,6 @@ func tryServeAsset(w http.ResponseWriter, r *http.Request, filesystem fs.FS) boo
 	return false
 }
 
-func newRuntimePool(size int) *runtimePool {
-	if size < 1 {
-		size = 1
-	}
-	return &runtimePool{
-		sem:  make(chan struct{}, size),
-		size: size,
-	}
-}
-
-func defaultRuntimePoolSize() int {
-	size := runtime.GOMAXPROCS(0) * 2
-	if size < 1 {
-		return 1
-	}
-	return size
-}
-
-func (p *runtimePool) acquire(ctx context.Context) (*jsRuntime, error) {
-	select {
-	case p.sem <- struct{}{}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-
-	vm, err := newRuntimeWithContext()
-	if err != nil {
-		select {
-		case <-p.sem:
-		default:
-		}
-		return nil, err
-	}
-
-	return vm, nil
-}
-
-func (p *runtimePool) release(vm *jsRuntime) {
-	if vm == nil {
-		return
-	}
-
-	closeRuntime(vm)
-
-	select {
-	case <-p.sem:
-	default:
-	}
-}
-
 func newRuntimeWithContext() (*jsRuntime, error) {
 	rt := quickjs.NewRuntime()
 	rt.SetMaxStackSize(quickjsStackSize)
@@ -368,7 +304,7 @@ func currentRenderTimeout() time.Duration {
 func loadPolyfills(ctx *quickjs.Context) error {
 	result := ctx.Eval(polyfillsSource)
 	if result.IsException() {
-		return fmt.Errorf("polyfills: %s", ctx.Exception().Error())
+		return fmt.Errorf("🔴 polyfills: %s", ctx.Exception().Error())
 	}
 	result.Free()
 	return nil
@@ -409,10 +345,10 @@ func ServePrebuiltPage(w http.ResponseWriter, r *http.Request, componentPath str
 
 func RegisterPrebuiltBundle(componentPath string, rootID string, serverJS string, clientJS string, css string) error {
 	if componentPath == "" || rootID == "" {
-		return fmt.Errorf("component path and root id required")
+		return fmt.Errorf("🔴 component path and root id required")
 	}
 	if serverJS == "" || clientJS == "" || css == "" {
-		return fmt.Errorf("prebuilt assets cannot be empty")
+		return fmt.Errorf("🔴 prebuilt assets cannot be empty")
 	}
 
 	absPath, err := resolveAbsPath(componentPath, "component path")
@@ -573,17 +509,17 @@ func RenderTSXFileWithHydrationWithContext(ctx context.Context, filePath string,
 	}
 
 	if _, err := os.Stat(absPath); err != nil {
-		return nil, fmt.Errorf("component not found %s: %w", absPath, err)
+		return nil, fmt.Errorf("🔴 component not found %s: %w", absPath, err)
 	}
 
 	serverJS, clientJS, css := readBundlesFromCache(absPath, rootID)
 	if serverJS == "" || clientJS == "" || css == "" {
-		return nil, fmt.Errorf("component %s (rootID=%s) not registered; run 'alloy dev' or 'alloy build' first", absPath, rootID)
+		return nil, fmt.Errorf("🔴 component %s (rootID=%s) not registered; run 'alloy dev' or 'alloy build' first", absPath, rootID)
 	}
 
 	html, err := executeSSR(ctx, serverJS, props)
 	if err != nil {
-		return nil, fmt.Errorf("ssr failed for %s: %w", absPath, err)
+		return nil, fmt.Errorf("🔴 ssr failed for %s: %w", absPath, err)
 	}
 
 	return &RenderResult{
@@ -596,7 +532,7 @@ func RenderTSXFileWithHydrationWithContext(ctx context.Context, filePath string,
 
 func RenderPrebuiltWithContext(ctx context.Context, filePath string, props map[string]any, rootID string, files PrebuiltFiles) (*RenderResult, error) {
 	if files.Server == "" || files.Client == "" || files.CSS == "" {
-		return nil, fmt.Errorf("prebuilt file paths required")
+		return nil, fmt.Errorf("🔴 prebuilt file paths required")
 	}
 
 	absPath, err := resolveAbsPath(filePath, "component path")
@@ -606,12 +542,12 @@ func RenderPrebuiltWithContext(ctx context.Context, filePath string, props map[s
 
 	serverJS, clientJS, css := readBundlesFromCache(absPath, rootID)
 	if serverJS == "" || clientJS == "" || css == "" {
-		return nil, fmt.Errorf("component %s (rootID=%s) not registered; call RegisterPrebuiltBundleFromFS before serving", absPath, rootID)
+		return nil, fmt.Errorf("🔴 component %s (rootID=%s) not registered; call RegisterPrebuiltBundleFromFS before serving", absPath, rootID)
 	}
 
 	html, err := executeSSR(ctx, serverJS, props)
 	if err != nil {
-		return nil, fmt.Errorf("ssr failed for %s: %w", absPath, err)
+		return nil, fmt.Errorf("🔴 ssr failed for %s: %w", absPath, err)
 	}
 
 	paths := []string{ensureLeadingSlash(filepath.ToSlash(files.Client))}
@@ -638,7 +574,7 @@ func BuildServerBundle(filePath string) (string, []string, error) {
 		return "", nil, err
 	}
 	if _, err := os.Stat(absPath); err != nil {
-		return "", nil, fmt.Errorf("component not found %s: %w", absPath, err)
+		return "", nil, fmt.Errorf("🔴 component not found %s: %w", absPath, err)
 	}
 
 	tmpDir, err := os.MkdirTemp("", "alloy-")
@@ -669,12 +605,12 @@ func BuildServerBundle(filePath string) (string, []string, error) {
 	}
 
 	if len(result.OutputFiles) == 0 {
-		return "", nil, fmt.Errorf("esbuild produced no server bundle for %s", absPath)
+		return "", nil, fmt.Errorf("🔴 esbuild produced no server bundle for %s", absPath)
 	}
 
 	deps, err := bundleInputs(result.Metafile)
 	if err != nil {
-		return "", nil, fmt.Errorf("parse server metafile %s: %w", absPath, err)
+		return "", nil, fmt.Errorf("🔴 parse server metafile %s: %w", absPath, err)
 	}
 
 	deps = filterOutPath(deps, entryPath)
@@ -684,7 +620,7 @@ func BuildServerBundle(filePath string) (string, []string, error) {
 
 func writeManifestEntry(dir string, name string, files *PrebuiltFiles) error {
 	if files == nil {
-		return fmt.Errorf("files required")
+		return fmt.Errorf("🔴 files required")
 	}
 
 	path := filepath.Join(dir, "manifest.json")
@@ -705,7 +641,7 @@ func updateManifest(manifestPath string, updates map[string]manifestEntry) error
 
 	if data, err := os.ReadFile(manifestPath); err == nil {
 		if err := json.Unmarshal(data, &manifest); err != nil {
-			return fmt.Errorf("decode manifest: %w", err)
+			return fmt.Errorf("🔴 decode manifest: %w", err)
 		}
 	}
 
@@ -713,11 +649,11 @@ func updateManifest(manifestPath string, updates map[string]manifestEntry) error
 
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode manifest: %w", err)
+		return fmt.Errorf("🔴 encode manifest: %w", err)
 	}
 
 	if err := os.WriteFile(manifestPath, data, 0644); err != nil {
-		return fmt.Errorf("write manifest file: %w", err)
+		return fmt.Errorf("🔴 write manifest file: %w", err)
 	}
 
 	return nil
@@ -729,14 +665,14 @@ func WriteManifest(dir string, name string, files PrebuiltFiles) error {
 
 func SaveServerBundle(serverJS string, dir string, name string) (*PrebuiltFiles, error) {
 	if serverJS == "" {
-		return nil, fmt.Errorf("server required")
+		return nil, fmt.Errorf("🔴 server required")
 	}
 	if dir == "" || name == "" {
-		return nil, fmt.Errorf("dir and name required")
+		return nil, fmt.Errorf("🔴 dir and name required")
 	}
 
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil, fmt.Errorf("make dir: %w", err)
+		return nil, fmt.Errorf("🔴 make dir: %w", err)
 	}
 
 	serverHash := shortHash(serverJS)
@@ -746,7 +682,7 @@ func SaveServerBundle(serverJS string, dir string, name string) (*PrebuiltFiles,
 	}
 
 	if err := os.WriteFile(files.Server, []byte(serverJS), 0644); err != nil {
-		return nil, fmt.Errorf("write server bundle: %w", err)
+		return nil, fmt.Errorf("🔴 write server bundle: %w", err)
 	}
 
 	return files, nil
@@ -754,23 +690,23 @@ func SaveServerBundle(serverJS string, dir string, name string) (*PrebuiltFiles,
 
 func SaveCSS(css string, dir string, name string) (string, error) {
 	if css == "" {
-		return "", fmt.Errorf("css required")
+		return "", fmt.Errorf("🔴 css required")
 	}
 	if dir == "" {
-		return "", fmt.Errorf("dir required")
+		return "", fmt.Errorf("🔴 dir required")
 	}
 	if name == "" {
 		name = "shared"
 	}
 
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", fmt.Errorf("make dir: %w", err)
+		return "", fmt.Errorf("🔴 make dir: %w", err)
 	}
 
 	cssHash := shortHash(css)
 	path := filepath.Join(dir, fmt.Sprintf("%s-%s.css", name, cssHash))
 	if err := os.WriteFile(path, []byte(css), 0644); err != nil {
-		return "", fmt.Errorf("write shared css: %w", err)
+		return "", fmt.Errorf("🔴 write shared css: %w", err)
 	}
 
 	return path, nil
@@ -794,10 +730,10 @@ func baseNames(paths []string) []string {
 
 func RegisterPrebuiltBundleFromFS(componentPath string, rootID string, filesystem fs.FS, files PrebuiltFiles) error {
 	if filesystem == nil {
-		return fmt.Errorf("filesystem required")
+		return fmt.Errorf("🔴 filesystem required")
 	}
 	if files.Server == "" || files.Client == "" || files.CSS == "" {
-		return fmt.Errorf("prebuilt file paths required")
+		return fmt.Errorf("🔴 prebuilt file paths required")
 	}
 
 	readFS := filesystem
@@ -807,16 +743,16 @@ func RegisterPrebuiltBundleFromFS(componentPath string, rootID string, filesyste
 		serverBytes, err = fs.ReadFile(readFS, files.Server)
 	}
 	if err != nil {
-		return fmt.Errorf("read server bundle: %w", err)
+		return fmt.Errorf("🔴 read server bundle: %w", err)
 	}
 
 	clientBytes, err := fs.ReadFile(readFS, files.Client)
 	if err != nil {
-		return fmt.Errorf("read client bundle: %w", err)
+		return fmt.Errorf("🔴 read client bundle: %w", err)
 	}
 	cssBytes, err := fs.ReadFile(readFS, files.CSS)
 	if err != nil {
-		return fmt.Errorf("read css: %w", err)
+		return fmt.Errorf("🔴 read css: %w", err)
 	}
 
 	return RegisterPrebuiltBundle(componentPath, rootID, string(serverBytes), string(clientBytes), string(cssBytes))
@@ -907,10 +843,10 @@ func addCacheHeaders(w http.ResponseWriter, assetPath string, root assetRoot, re
 
 func BuildClientBundles(entries []ClientEntry, outDir string) (map[string]ClientAssets, error) {
 	if len(entries) == 0 {
-		return nil, fmt.Errorf("entries required")
+		return nil, fmt.Errorf("🔴 entries required")
 	}
 	if outDir == "" {
-		return nil, fmt.Errorf("out dir required")
+		return nil, fmt.Errorf("🔴 out dir required")
 	}
 
 	absOut, err := resolveAbsPath(outDir, "out dir")
@@ -918,20 +854,20 @@ func BuildClientBundles(entries []ClientEntry, outDir string) (map[string]Client
 		return nil, err
 	}
 	if err := os.MkdirAll(absOut, 0755); err != nil {
-		return nil, fmt.Errorf("make out dir: %w", err)
+		return nil, fmt.Errorf("🔴 make out dir: %w", err)
 	}
 
 	entryPoints := make(map[string]ClientEntry, len(entries))
 
 	tmpDir, err := os.MkdirTemp("", "alloy-clients-")
 	if err != nil {
-		return nil, fmt.Errorf("make temp dir: %w", err)
+		return nil, fmt.Errorf("🔴 make temp dir: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
 	for _, e := range entries {
 		if e.Name == "" || e.Component == "" {
-			return nil, fmt.Errorf("entry name and component required")
+			return nil, fmt.Errorf("🔴 entry name and component required")
 		}
 		rootID := e.RootID
 		if rootID == "" {
@@ -947,7 +883,7 @@ func BuildClientBundles(entries []ClientEntry, outDir string) (map[string]Client
 
 		entryPath := filepath.Join(tmpDir, e.Name+".tsx")
 		if err := os.WriteFile(entryPath, []byte(wrapper), 0644); err != nil {
-			return nil, fmt.Errorf("write entry %s: %w", e.Name, err)
+			return nil, fmt.Errorf("🔴 write entry %s: %w", e.Name, err)
 		}
 
 		entryPoints[e.Name] = ClientEntry{
@@ -985,7 +921,7 @@ func BuildClientBundles(entries []ClientEntry, outDir string) (map[string]Client
 		} `json:"outputs"`
 	}
 	if err := json.Unmarshal([]byte(result.Metafile), &meta); err != nil {
-		return nil, fmt.Errorf("parse metafile: %w", err)
+		return nil, fmt.Errorf("🔴 parse metafile: %w", err)
 	}
 
 	outputs := map[string]ClientAssets{}
@@ -1003,7 +939,7 @@ func BuildClientBundles(entries []ClientEntry, outDir string) (map[string]Client
 
 		entryRel, err := filepath.Rel(absOut, outPathAbs)
 		if err != nil {
-			return nil, fmt.Errorf("entry rel: %w", err)
+			return nil, fmt.Errorf("🔴 entry rel: %w", err)
 		}
 		entryRel = filepath.ToSlash(entryRel)
 		if name == "" {
@@ -1028,7 +964,7 @@ func BuildClientBundles(entries []ClientEntry, outDir string) (map[string]Client
 
 	for name := range entryPoints {
 		if outputs[name].Entry == "" {
-			return nil, fmt.Errorf("missing client bundle for %s", name)
+			return nil, fmt.Errorf("🔴 missing client bundle for %s", name)
 		}
 	}
 
@@ -1086,14 +1022,14 @@ func disableMinify(opts *api.BuildOptions) {
 
 func checkBuildErrors(result api.BuildResult, context string) error {
 	if len(result.Errors) > 0 {
-		return fmt.Errorf("%s: %s", context, result.Errors[0].Text)
+		return fmt.Errorf("🔴 %s: %s", context, result.Errors[0].Text)
 	}
 	return nil
 }
 
 func checkContextError(err error, context string) error {
 	if ctxErr, ok := err.(*api.ContextError); ok && ctxErr != nil {
-		return fmt.Errorf("%s: %v", context, err)
+		return fmt.Errorf("🔴 %s: %v", context, err)
 	}
 	return nil
 }
@@ -1147,7 +1083,7 @@ func ensureLeadingSlash(p string) string {
 func resolveAbsPath(path, context string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return "", fmt.Errorf("resolve %s: %w", context, err)
+		return "", fmt.Errorf("🔴 resolve %s: %w", context, err)
 	}
 	return abs, nil
 }
@@ -1186,12 +1122,12 @@ func lookupManifest(filesystem fs.FS, dist string, base string) (PrebuiltFiles, 
 		return PrebuiltFiles{}, false, nil
 	}
 	if err != nil {
-		return PrebuiltFiles{}, false, fmt.Errorf("read manifest: %w", err)
+		return PrebuiltFiles{}, false, fmt.Errorf("🔴 read manifest: %w", err)
 	}
 
 	manifest := map[string]manifestEntry{}
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		return PrebuiltFiles{}, false, fmt.Errorf("decode manifest: %w", err)
+		return PrebuiltFiles{}, false, fmt.Errorf("🔴 decode manifest: %w", err)
 	}
 
 	entry, ok := manifest[base]
@@ -1236,7 +1172,7 @@ func defaultRootID(componentPath string) string {
 func RunTailwind(cssPath string, root string) (string, error) {
 	outputFile, err := os.CreateTemp("", "alloy-tailwind-*.css")
 	if err != nil {
-		return "", fmt.Errorf("create temp css: %w", err)
+		return "", fmt.Errorf("🔴 create temp css: %w", err)
 	}
 	outputPath := outputFile.Name()
 	outputFile.Close()
@@ -1251,12 +1187,12 @@ func RunTailwind(cssPath string, root string) (string, error) {
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("tailwind build %s: %w: %s", cssPath, err, strings.TrimSpace(string(output)))
+		return "", fmt.Errorf("🔴 tailwind build %s: %w: %s", cssPath, err, strings.TrimSpace(string(output)))
 	}
 
 	css, err := os.ReadFile(outputPath)
 	if err != nil {
-		return "", fmt.Errorf("read css output: %w", err)
+		return "", fmt.Errorf("🔴 read css output: %w", err)
 	}
 
 	return string(css), nil
@@ -1265,7 +1201,7 @@ func RunTailwind(cssPath string, root string) (string, error) {
 func tailwindCmd(root string, args ...string) (*exec.Cmd, error) {
 	runner, baseArgs := ResolveTailwindRunner(root)
 	if runner == "" {
-		return nil, fmt.Errorf("tailwind runner not found")
+		return nil, fmt.Errorf("🔴 tailwind runner not found")
 	}
 	fullArgs := append(baseArgs, args...)
 	cmd := exec.Command(runner, fullArgs...)
@@ -1310,27 +1246,27 @@ func fileExists(path string) bool {
 
 func BuildDevBundles(pages []PageSpec, distDir string) error {
 	if len(pages) == 0 {
-		return fmt.Errorf("no pages provided")
+		return fmt.Errorf("🔴 no pages provided")
 	}
 	if distDir == "" {
-		return fmt.Errorf("distDir required")
+		return fmt.Errorf("🔴 distDir required")
 	}
 
 	for _, page := range pages {
 		serverJS, _, err := BuildServerBundle(page.Component)
 		if err != nil {
-			return fmt.Errorf("build server %s: %w", page.Name, err)
+			return fmt.Errorf("🔴 build server %s: %w", page.Name, err)
 		}
 
 		serverPath := filepath.Join(distDir, fmt.Sprintf("%s-server.js", page.Name))
 		if err := os.WriteFile(serverPath, []byte(serverJS), 0644); err != nil {
-			return fmt.Errorf("write server %s: %w", page.Name, err)
+			return fmt.Errorf("🔴 write server %s: %w", page.Name, err)
 		}
 	}
 
 	tmpClientDir, err := os.MkdirTemp("", "alloy-initial-client-")
 	if err != nil {
-		return fmt.Errorf("create temp client dir: %w", err)
+		return fmt.Errorf("🔴 create temp client dir: %w", err)
 	}
 	defer os.RemoveAll(tmpClientDir)
 
@@ -1345,7 +1281,7 @@ func BuildDevBundles(pages []PageSpec, distDir string) error {
 
 		entryPath := filepath.Join(tmpClientDir, page.Name+".tsx")
 		if err := os.WriteFile(entryPath, []byte(wrapperCode), 0644); err != nil {
-			return fmt.Errorf("write client entry: %w", err)
+			return fmt.Errorf("🔴 write client entry: %w", err)
 		}
 
 		clientEntries = append(clientEntries, api.EntryPoint{
@@ -1371,7 +1307,7 @@ func BuildDevBundles(pages []PageSpec, distDir string) error {
 	}
 
 	if err := writeDevManifest(pages, distDir); err != nil {
-		return fmt.Errorf("write manifest: %w", err)
+		return fmt.Errorf("🔴 write manifest: %w", err)
 	}
 
 	return nil
@@ -1427,11 +1363,10 @@ func WatchAndBuild(ctx context.Context, pages []PageSpec, distDir string, buildD
 	cwd, _ := os.Getwd()
 
 	if err := BuildDevBundles(pages, distDir); err != nil {
-		return fmt.Errorf("initial build: %w", err)
+		return fmt.Errorf("🔴 initial build: %w", err)
 	}
 
-	logger := NewLogger()
-	logger.Success("Initial build complete")
+	fmt.Fprintf(os.Stdout, "✅ Initial build complete\n")
 
 	if buildDone != nil {
 		close(buildDone)
@@ -1439,7 +1374,7 @@ func WatchAndBuild(ctx context.Context, pages []PageSpec, distDir string, buildD
 
 	serverTmpDir, err := os.MkdirTemp("", "alloy-server-")
 	if err != nil {
-		return fmt.Errorf("create server temp dir: %w", err)
+		return fmt.Errorf("🔴 create server temp dir: %w", err)
 	}
 	defer os.RemoveAll(serverTmpDir)
 
@@ -1457,7 +1392,7 @@ func WatchAndBuild(ctx context.Context, pages []PageSpec, distDir string, buildD
 
 		entryPath := filepath.Join(serverTmpDir, page.Name+"-entry.tsx")
 		if err := os.WriteFile(entryPath, []byte(entryCode), 0644); err != nil {
-			return fmt.Errorf("write entry: %w", err)
+			return fmt.Errorf("🔴 write entry: %w", err)
 		}
 
 		outPath := filepath.Join(distDir, fmt.Sprintf("%s-server.js", page.Name))
@@ -1483,7 +1418,7 @@ func WatchAndBuild(ctx context.Context, pages []PageSpec, distDir string, buildD
 		g.Go(func() error {
 			err := watchCtx.Watch(api.WatchOptions{})
 			if err != nil {
-				return fmt.Errorf("watch server %s: %w", pageName, err)
+				return fmt.Errorf("🔴 watch server %s: %w", pageName, err)
 			}
 
 			<-ctx.Done()
@@ -1499,7 +1434,7 @@ func WatchAndBuild(ctx context.Context, pages []PageSpec, distDir string, buildD
 
 	tmpClientDir, err := os.MkdirTemp("", "alloy-client-")
 	if err != nil {
-		return fmt.Errorf("create client temp: %w", err)
+		return fmt.Errorf("🔴 create client temp: %w", err)
 	}
 	defer os.RemoveAll(tmpClientDir)
 
@@ -1514,7 +1449,7 @@ func WatchAndBuild(ctx context.Context, pages []PageSpec, distDir string, buildD
 
 		entryPath := filepath.Join(tmpClientDir, page.Name+".tsx")
 		if err := os.WriteFile(entryPath, []byte(wrapperCode), 0644); err != nil {
-			return fmt.Errorf("write client entry: %w", err)
+			return fmt.Errorf("🔴 write client entry: %w", err)
 		}
 
 		clientEntries = append(clientEntries, api.EntryPoint{
@@ -1542,7 +1477,7 @@ func WatchAndBuild(ctx context.Context, pages []PageSpec, distDir string, buildD
 	g.Go(func() error {
 		err := clientCtx.Watch(api.WatchOptions{})
 		if err != nil {
-			return fmt.Errorf("watch client: %w", err)
+			return fmt.Errorf("🔴 watch client: %w", err)
 		}
 
 		<-ctx.Done()
@@ -1552,11 +1487,11 @@ func WatchAndBuild(ctx context.Context, pages []PageSpec, distDir string, buildD
 	g.Go(func() error {
 		cmd := WatchTailwind(ctx, cssPath, filepath.Join(distDir, "shared.css"), cwd)
 		if cmd == nil {
-			return fmt.Errorf("tailwind runner not found")
+			return fmt.Errorf("🔴 tailwind runner not found")
 		}
 
 		if err := cmd.Start(); err != nil {
-			return fmt.Errorf("start tailwind: %w", err)
+			return fmt.Errorf("🔴 start tailwind: %w", err)
 		}
 
 		go func() {
@@ -1570,7 +1505,7 @@ func WatchAndBuild(ctx context.Context, pages []PageSpec, distDir string, buildD
 	})
 
 	if err := writeDevManifest(pages, distDir); err != nil {
-		return fmt.Errorf("write manifest: %w", err)
+		return fmt.Errorf("🔴 write manifest: %w", err)
 	}
 
 	return g.Wait()
@@ -1580,7 +1515,7 @@ func DiscoverPages(dir string) ([]PageSpec, error) {
 	pattern := filepath.Join(dir, "*.tsx")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
-		return nil, fmt.Errorf("find pages: %w", err)
+		return nil, fmt.Errorf("🔴 find pages: %w", err)
 	}
 
 	var pages []PageSpec
@@ -1619,11 +1554,11 @@ func executeSSR(ctx context.Context, jsCode string, props map[string]any) (strin
 		defer cancel()
 	}
 
-	vm, err := jsPool.acquire(ctx)
+	vm, err := newRuntimeWithContext()
 	if err != nil {
-		return "", fmt.Errorf("acquire runtime: %w", err)
+		return "", fmt.Errorf("🔴 create runtime: %w", err)
 	}
-	defer jsPool.release(vm)
+	defer closeRuntime(vm)
 
 	vm.rt.SetInterruptHandler(makeInterruptHandler(ctx))
 	defer vm.rt.ClearInterruptHandler()
@@ -1646,13 +1581,13 @@ func runSSR(ctx *quickjs.Context, jsCode string, props map[string]any) (string, 
 	result := ctx.Eval(jsCode)
 	if result.IsException() {
 		result.Free()
-		return "", fmt.Errorf("eval component bundle: %s", ctx.Exception())
+		return "", fmt.Errorf("🔴 eval component bundle: %s", ctx.Exception())
 	}
 	defer result.Free()
 
 	propsJSON, err := json.Marshal(props)
 	if err != nil {
-		return "", fmt.Errorf("marshal props: %w", err)
+		return "", fmt.Errorf("🔴 marshal props: %w", err)
 	}
 
 	renderCode := fmt.Sprintf(renderTemplate, string(propsJSON))
@@ -1661,7 +1596,7 @@ func runSSR(ctx *quickjs.Context, jsCode string, props map[string]any) (string, 
 	defer renderResult.Free()
 
 	if !renderResult.IsString() {
-		return "", fmt.Errorf("render returned non-string: %s", renderResult.String())
+		return "", fmt.Errorf("🔴 render returned non-string: %s", renderResult.String())
 	}
 
 	return renderResult.String(), nil
@@ -1676,7 +1611,7 @@ func bundleInputs(meta string) ([]string, error) {
 
 	var mf metafile
 	if err := json.Unmarshal([]byte(meta), &mf); err != nil {
-		return nil, fmt.Errorf("parse esbuild metafile: %w", err)
+		return nil, fmt.Errorf("🔴 parse esbuild metafile: %w", err)
 	}
 
 	var inputs []string
@@ -1712,4 +1647,17 @@ func ServePrebuiltPageWithContext(w http.ResponseWriter, r *http.Request, compon
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprint(w, result.ToHTML(rootID))
+}
+
+func QuietWriter() io.Writer {
+	if os.Getenv("DEBUG") != "" {
+		return os.Stdout
+	}
+	return io.Discard
+}
+
+func FormatPath(path string) string {
+	cwd, _ := os.Getwd()
+	rel := strings.TrimPrefix(path, cwd+"/")
+	return rel
 }

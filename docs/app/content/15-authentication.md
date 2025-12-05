@@ -141,7 +141,7 @@ func verifyJWT(tokenString string) (string, error) {
 		return claims.UserID, nil
 	}
 
-	return "", fmt.Errorf("invalid token")
+	return "", fmt.Errorf("🔴 invalid token")
 }
 ```
 

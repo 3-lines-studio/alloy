@@ -26,9 +26,9 @@ func main() {
 		w.Write([]byte(`{"ok":true}`))
 	})
 
-	fmt.Println("✓ Server running at http://localhost:8080")
+	fmt.Println("✅ Server running at http://localhost:8080")
 	if err := http.ListenAndServe(":8080", mux); err != nil {
-		fmt.Fprintf(os.Stderr, "✗ %s\n", err)
+		fmt.Fprintf(os.Stderr, "🔴 %s\n", err)
 		os.Exit(1)
 	}
 }

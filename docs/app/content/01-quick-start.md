@@ -139,7 +139,7 @@ With `ALLOY_DEV=1`, alloy rebuilds pages and Tailwind on every request. Changes 
 Generate prebuilt assets:
 
 ```sh
-alloy -pages app/pages -out app/dist/alloy
+alloy --pages app/pages --out app/dist/alloy
 ```
 
 This creates:

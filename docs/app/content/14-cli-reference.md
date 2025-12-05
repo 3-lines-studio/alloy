@@ -18,14 +18,14 @@ Build precompiled assets for production deployment:
 
 ## Options
 
-### -pages
+### --pages
 
 Directory containing `.tsx` page components.
 
 ```sh
-alloy -pages app/pages
-alloy -pages pages
-alloy -pages src/views
+alloy --pages app/pages
+alloy --pages pages
+alloy --pages src/views
 ```
 
 **Default:**
@@ -33,19 +33,19 @@ alloy -pages src/views
 - Falls back to `pages/`
 - Errors if neither exists
 
-### -out
+### --out
 
 Output directory for built assets.
 
 ```sh
-alloy -out dist/production
-alloy -out build/alloy
-alloy -out app/dist/alloy
+alloy --out dist/production
+alloy --out build/alloy
+alloy --out app/dist/alloy
 ```
 
 **Default:**
-- If `-pages` is `app/pages` → `app/dist/alloy`
-- If `-pages` is `pages` → `dist/alloy`
+- If `-pages` is `app/pages` ➡️ `app/dist/alloy`
+- If `-pages` is `pages` ➡️ `dist/alloy`
 - Otherwise: `<pages-parent>/dist/alloy`
 
 ## Examples
@@ -61,7 +61,7 @@ Discovers pages in `app/pages/`, outputs to `app/dist/alloy/`.
 ### Custom paths
 
 ```sh
-alloy -pages src/pages -out build/assets
+alloy --pages src/pages --out build/assets
 ```
 
 ### CI/CD
@@ -91,7 +91,7 @@ go build -o app
 The CLI performs these steps:
 
 1. **Discover pages**: Find all `.tsx` files in pages directory
-2. **Compile CSS**: Run Tailwind on `app/pages/app.css` → `shared.css`
+2. **Compile CSS**: Run Tailwind on `app/pages/app.css` ➡️ `shared.css`
 3. **Build client bundles**: Generate hydration JavaScript for browser
 4. **Build server bundles**: Generate rendering JavaScript for QuickJS
 5. **Write manifest**: Create `manifest.json` mapping pages to assets
@@ -135,10 +135,10 @@ Requires `app/pages/app.css`:
 **Dependencies:** Tailwind must be installed via npm/pnpm/yarn/bun.
 
 **Detection:** CLI auto-detects your package manager:
-- Checks for `pnpm-lock.yaml` → uses `pnpm`
-- Checks for `yarn.lock` → uses `yarn`
-- Checks for `package-lock.json` → uses `npm`
-- Checks for `bun.lockb` → uses `bun`
+- Checks for `pnpm-lock.yaml` ➡️ uses `pnpm`
+- Checks for `yarn.lock` ➡️ uses `yarn`
+- Checks for `package-lock.json` ➡️ uses `npm`
+- Checks for `bun.lockb` ➡️ uses `bun`
 - Falls back to `npx`
 
 ## Error handling

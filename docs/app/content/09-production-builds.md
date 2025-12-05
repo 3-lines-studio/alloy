@@ -26,7 +26,7 @@ With default structure (`app/pages/`), this outputs to `app/dist/alloy/`.
 Specify pages directory:
 
 ```sh
-alloy -pages pages
+alloy --pages pages
 ```
 
 **Default behavior:**
@@ -39,17 +39,17 @@ alloy -pages pages
 Specify output directory:
 
 ```sh
-alloy -out dist/production
+alloy --out dist/production
 ```
 
 **Default behavior:**
-- If pages dir is `app/pages` → outputs to `app/dist/alloy`
-- If pages dir is `pages` → outputs to `dist/alloy`
+- If pages dir is `app/pages` ➡️ outputs to `app/dist/alloy`
+- If pages dir is `pages` ➡️ outputs to `dist/alloy`
 
 ### Full example
 
 ```sh
-alloy -pages src/pages -out build/alloy
+alloy --pages src/pages --out build/alloy
 ```
 
 ## Output structure
@@ -95,10 +95,10 @@ The CLI finds all `.tsx` files in your pages directory:
 
 ```
 app/pages/
-├── home.tsx       → Becomes "home" in manifest
-├── about.tsx      → Becomes "about"
-├── blog.tsx       → Becomes "blog"
-└── app.css        → Used for Tailwind compilation
+├── home.tsx       ➡️ Becomes "home" in manifest
+├── about.tsx      ➡️ Becomes "about"
+├── blog.tsx       ➡️ Becomes "blog"
+└── app.css        ➡️ Used for Tailwind compilation
 ```
 
 **Page name** = filename without extension.
@@ -255,8 +255,8 @@ For cache busting, configure your reverse proxy or CDN to set appropriate `Cache
 Run `alloy` multiple times with different `-out` directories for multi-tenant or staged deployments:
 
 ```sh
-alloy -pages app/pages -out dist/staging
-alloy -pages app/pages -out dist/production
+alloy --pages app/pages --out dist/staging
+alloy --pages app/pages --out dist/production
 ```
 
 Then select the appropriate embedded filesystem in your Go code based on environment.

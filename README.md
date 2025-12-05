@@ -22,7 +22,7 @@ Requires Go 1.25+ and a Node toolchain with `tailwindcss` available via `pnpm`, 
 alloy
 
 # for more options
-alloy -pages app/pages
+alloy --pages app/pages
 ```
 
 This writes server/client/CSS bundles and a `manifest.json` under `.alloy/dist`.

@@ -14,8 +14,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-var logger = alloy.NewLogger()
-
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -44,18 +42,18 @@ Commands:
   dev      Run with live reload
 
 Flags:
-  -pages string
+  --pages string
         Directory containing page components (.tsx)
         Auto-discovers: app/pages or pages
-  -out string
+  --out string
         Output directory for bundles
         Default: {pages_parent}/dist/alloy
 
 Examples:
   alloy build
-  alloy build -pages app/pages -out app/dist
+  alloy build --pages app/pages --out app/dist
   alloy dev
-  alloy dev -pages app/pages -out app/dist
+  alloy dev --pages app/pages --out app/dist
   alloy watch
 `)
 }
@@ -71,46 +69,46 @@ func runBuild(args []string) {
 
 	pagesDir = defaultPagesDir(pagesDir)
 	if pagesDir == "" {
-		logger.Error("pages dir required")
+		fmt.Fprintf(os.Stderr, "🔴 pages dir required\n")
 		os.Exit(1)
 	}
 	distDir = defaultDistDir(distDir)
 	if distDir == "" {
-		logger.Error("out dir required")
+		fmt.Fprintf(os.Stderr, "🔴 out dir required\n")
 		os.Exit(1)
 	}
 
 	cleanDist := filepath.Clean(distDir)
 	if cleanDist == "." || cleanDist == string(filepath.Separator) {
-		logger.Error(fmt.Sprintf("refusing to remove dist dir %q", distDir))
+		fmt.Fprintf(os.Stderr, "🔴 refusing to remove dist dir %q\n", distDir)
 		os.Exit(1)
 	}
 	if err := os.RemoveAll(cleanDist); err != nil {
-		logger.Error(err.Error())
+		fmt.Fprintf(os.Stderr, "🔴 %v\n", err)
 		os.Exit(1)
 	}
 
 	pages, err := alloy.DiscoverPages(pagesDir)
 	if err != nil {
-		logger.Error(err.Error())
+		fmt.Fprintf(os.Stderr, "🔴 %v\n", err)
 		os.Exit(1)
 	}
 	if len(pages) == 0 {
-		logger.Error(fmt.Sprintf("no pages found in %s", pagesDir))
+		fmt.Fprintf(os.Stderr, "🔴 no pages found in %s\n", pagesDir)
 		os.Exit(1)
 	}
 
-	logger.Start("Building production bundles...")
+	fmt.Fprintf(os.Stdout, "\n🔨 Building production bundles\n")
 
 	cssPath := filepath.Join(alloy.DefaultAppDir, "app.css")
 	sharedCSS, err := alloy.RunTailwind(cssPath, filepath.Dir(pagesDir))
 	if err != nil {
-		logger.Error(err.Error())
+		fmt.Fprintf(os.Stderr, "🔴 %v\n", err)
 		os.Exit(1)
 	}
 	sharedCSSPath, err := alloy.SaveCSS(sharedCSS, distDir, "shared")
 	if err != nil {
-		logger.Error(err.Error())
+		fmt.Fprintf(os.Stderr, "🔴 %v\n", err)
 		os.Exit(1)
 	}
 
@@ -125,18 +123,18 @@ func runBuild(args []string) {
 
 	clientAssets, err := alloy.BuildClientBundles(clientInputs, distDir)
 	if err != nil {
-		logger.Error(err.Error())
+		fmt.Fprintf(os.Stderr, "🔴 %v\n", err)
 		os.Exit(1)
 	}
 
 	for _, page := range pages {
 		if err := buildPage(page, distDir, clientAssets[page.Name], sharedCSSPath); err != nil {
-			logger.Error(err.Error())
+			fmt.Fprintf(os.Stderr, "🔴 %v\n", err)
 			os.Exit(1)
 		}
 	}
 
-	logger.Success(fmt.Sprintf("Build complete: %d pages → %s", len(pages), alloy.FormatPath(distDir)))
+	fmt.Fprintf(os.Stdout, "✅ Build complete: %d pages ➡️ %s\n", len(pages), alloy.FormatPath(distDir))
 }
 
 func runDev(args []string) {
@@ -152,17 +150,17 @@ func runDev(args []string) {
 	distDir = defaultDistDir(distDir)
 
 	if err := os.MkdirAll(distDir, 0755); err != nil {
-		logger.Error(fmt.Sprintf("create dist dir: %v", err))
+		fmt.Fprintf(os.Stderr, "🔴 create dist dir: %v\n", err)
 		os.Exit(1)
 	}
 
 	pages, err := alloy.DiscoverPages(pagesDir)
 	if err != nil {
-		logger.Error(err.Error())
+		fmt.Fprintf(os.Stderr, "🔴 %v\n", err)
 		os.Exit(1)
 	}
 	if len(pages) == 0 {
-		logger.Error(fmt.Sprintf("no pages found in %s", pagesDir))
+		fmt.Fprintf(os.Stderr, "🔴 no pages found in %s\n", pagesDir)
 		os.Exit(1)
 	}
 
@@ -174,7 +172,7 @@ func runDev(args []string) {
 
 	go func() {
 		<-sigChan
-		fmt.Println("\n→ Shutting down...")
+		fmt.Println("\n➡️ Shutting down...")
 		cancel()
 	}()
 
@@ -183,7 +181,7 @@ func runDev(args []string) {
 	var g errgroup.Group
 
 	g.Go(func() error {
-		logger.Start(fmt.Sprintf("Watching %d pages in %s", len(pages), alloy.FormatPath(pagesDir)))
+		fmt.Fprintf(os.Stdout, "\n👀 Watching %d pages in %s\n", len(pages), alloy.FormatPath(pagesDir))
 		err := alloy.WatchAndBuild(ctx, pages, distDir, initialBuildDone)
 		if err == context.Canceled {
 			return nil
@@ -200,14 +198,14 @@ func runDev(args []string) {
 
 		airPath, err := exec.LookPath("air")
 		if err != nil {
-			return fmt.Errorf("air not found in PATH")
+			return fmt.Errorf("🔴 air not found in PATH")
 		}
 
 		configPath := ".air.toml"
 		if !fileExists(configPath) {
 			tmpConfig, err := os.CreateTemp("", "air-*.toml")
 			if err != nil {
-				return fmt.Errorf("create temp air config: %w", err)
+				return fmt.Errorf("🔴 create temp air config: %w", err)
 			}
 			configPath = tmpConfig.Name()
 			defer os.Remove(configPath)
@@ -233,7 +231,7 @@ proxy_port = 3000
 app_port = 8080
 `
 			if _, err := tmpConfig.WriteString(defaultConfig); err != nil {
-				return fmt.Errorf("write air config: %w", err)
+				return fmt.Errorf("🔴 write air config: %w", err)
 			}
 			tmpConfig.Close()
 		}
@@ -244,9 +242,9 @@ app_port = 8080
 		cmd.Stdin = os.Stdin
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-		logger.Start("Starting live reload")
+		fmt.Fprintf(os.Stdout, "🔄 Starting live reload\n\n")
 		if err := cmd.Start(); err != nil {
-			return fmt.Errorf("start air: %w", err)
+			return fmt.Errorf("🔴 start air: %w", err)
 		}
 
 		done := make(chan error, 1)
@@ -269,24 +267,24 @@ app_port = 8080
 	})
 
 	if err := g.Wait(); err != nil {
-		logger.Error(err.Error())
+		fmt.Fprintf(os.Stderr, "🔴 %v\n", err)
 		os.Exit(1)
 	}
 }
 
 func buildPage(page alloy.PageSpec, distDir string, client alloy.ClientAssets, sharedCSSPath string) error {
 	if distDir == "" {
-		return fmt.Errorf("out dir required")
+		return fmt.Errorf("🔴 out dir required")
 	}
 
 	serverJS, _, err := alloy.BuildServerBundle(page.Component)
 	if err != nil {
-		return fmt.Errorf("build server %s: %w", page.Component, err)
+		return fmt.Errorf("🔴 build server %s: %w", page.Component, err)
 	}
 
 	files, err := alloy.SaveServerBundle(serverJS, distDir, page.Name)
 	if err != nil {
-		return fmt.Errorf("save server %s: %w", page.Component, err)
+		return fmt.Errorf("🔴 save server %s: %w", page.Component, err)
 	}
 
 	files.Client = client.Entry
@@ -294,10 +292,9 @@ func buildPage(page alloy.PageSpec, distDir string, client alloy.ClientAssets, s
 	files.CSS = sharedCSSPath
 
 	if err := alloy.WriteManifest(distDir, page.Name, *files); err != nil {
-		return fmt.Errorf("write manifest %s: %w", page.Component, err)
+		return fmt.Errorf("🔴 write manifest %s: %w", page.Component, err)
 	}
 
-	logger.Debug(fmt.Sprintf("built %s → %s (client: %s)", alloy.FormatPath(page.Component), alloy.FormatPath(distDir), client.Entry))
 	return nil
 }
 

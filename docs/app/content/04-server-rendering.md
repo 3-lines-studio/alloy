@@ -173,12 +173,12 @@ QuickJS doesn't include Node.js or browser APIs. Alloy provides:
 
 | API | Support |
 |-----|---------|
-| `console.log/error/warn` | ✓ Forwarded to Go logger |
-| `TextEncoder/TextDecoder` | ✓ Polyfilled |
-| `performance.now()` | ✓ Polyfilled |
-| `setTimeout/setInterval` | ✗ Not available |
-| `fetch` | ✗ Not available (use props for data) |
-| `localStorage` | ✗ Not available (server-side) |
+| `console.log/error/warn` | ✅ Forwarded to Go logger |
+| `TextEncoder/TextDecoder` | ✅ Polyfilled |
+| `performance.now()` | ✅ Polyfilled |
+| `setTimeout/setInterval` | 🔴 Not available |
+| `fetch` | 🔴 Not available (use props for data) |
+| `localStorage` | 🔴 Not available (server-side) |
 
 **Server bundles run once per request.** No persistent state or timers.
 

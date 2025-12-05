@@ -147,9 +147,9 @@ Both functions serve files from `public/` automatically:
 
 ```
 public/
-├── favicon.ico    → http://localhost:8080/favicon.ico
+├── favicon.ico    ➡️ http://localhost:8080/favicon.ico
 └── images/
-    └── logo.png   → http://localhost:8080/images/logo.png
+    └── logo.png   ➡️ http://localhost:8080/images/logo.png
 ```
 
 Embed with:

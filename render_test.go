@@ -33,21 +33,21 @@ func TestRenderTSXFileWithHydration(t *testing.T) {
 	}
 
 	if !strings.Contains(result.HTML, "Fixture") {
-		t.Errorf("SSR output missing props: %s", result.HTML)
+		t.Errorf("🔴 SSR output missing props: %s", result.HTML)
 	}
 	if result.ClientJS == "" {
-		t.Errorf("client bundle missing")
+		t.Errorf("🔴 client bundle missing")
 	}
 	if result.CSS == "" {
-		t.Errorf("expected css output")
+		t.Errorf("🔴 expected css output")
 	}
 
 	full := result.ToHTML(rootID)
 	if !strings.Contains(full, `<div id="home-root">`) {
-		t.Errorf("wrapped html missing root container: %s", full)
+		t.Errorf("🔴 wrapped html missing root container: %s", full)
 	}
 	if !strings.Contains(full, `"title":"Fixture"`) {
-		t.Errorf("props json missing from document: %s", full)
+		t.Errorf("🔴 props json missing from document: %s", full)
 	}
 }
 
@@ -708,13 +708,13 @@ func TestMetaTagsArrayFormat(t *testing.T) {
 
 			for _, expected := range tt.contains {
 				if !strings.Contains(html, expected) {
-					t.Errorf("expected HTML to contain %q, got:\n%s", expected, html)
+					t.Errorf("🔴 expected HTML to contain %q, got:\n%s", expected, html)
 				}
 			}
 
 			for _, unexpected := range tt.notContains {
 				if strings.Contains(html, unexpected) {
-					t.Errorf("expected HTML NOT to contain %q, got:\n%s", unexpected, html)
+					t.Errorf("🔴 expected HTML NOT to contain %q, got:\n%s", unexpected, html)
 				}
 			}
 		})
@@ -758,7 +758,7 @@ func TestBuildServerBundle(t *testing.T) {
 		}
 	}
 	if !hasReact {
-		t.Errorf("expected deps to contain react, got: %v", deps)
+		t.Errorf("🔴 expected deps to contain react, got: %v", deps)
 	}
 }
 
@@ -768,7 +768,7 @@ func TestBuildServerBundleNonExistent(t *testing.T) {
 		t.Fatal("expected error for non-existent file")
 	}
 	if !strings.Contains(err.Error(), "not found") {
-		t.Errorf("unexpected error: %v", err)
+		t.Errorf("🔴 unexpected error: %v", err)
 	}
 }
 
@@ -879,7 +879,7 @@ func TestBuildClientBundlesEmptyEntries(t *testing.T) {
 		t.Fatal("expected error for empty entries")
 	}
 	if !strings.Contains(err.Error(), "entries required") {
-		t.Errorf("unexpected error: %v", err)
+		t.Errorf("🔴 unexpected error: %v", err)
 	}
 }
 
@@ -895,7 +895,7 @@ func TestBuildClientBundlesMissingFields(t *testing.T) {
 		t.Fatal("expected error for missing name")
 	}
 	if !strings.Contains(err.Error(), "name and component required") {
-		t.Errorf("unexpected error: %v", err)
+		t.Errorf("🔴 unexpected error: %v", err)
 	}
 }
 
@@ -915,7 +915,7 @@ func TestBuildClientBundlesInvalidOutDir(t *testing.T) {
 		t.Fatal("expected error for empty outDir")
 	}
 	if !strings.Contains(err.Error(), "out dir required") {
-		t.Errorf("unexpected error: %v", err)
+		t.Errorf("🔴 unexpected error: %v", err)
 	}
 }
 
