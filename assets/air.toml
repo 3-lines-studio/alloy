@@ -1,0 +1,16 @@
+tmp_dir = "dist/tmp"
+
+[build]
+delay = 0
+cmd = "go build -o dist/tmp/server main.go"
+entrypoint = ["dist/tmp/server"]
+include_ext = ["go", "json", "js", "css", "html"]
+exclude_dir = ["node_modules"]
+
+[log]
+silent = %v
+
+[proxy]
+enabled = true
+proxy_port = 3000
+app_port = 8080

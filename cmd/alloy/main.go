@@ -35,27 +35,8 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Fprintf(os.Stderr, `Usage: alloy <command> [flags]
-
-Commands:
-  build    Build production bundles with content hashes
-  dev      Run with live reload
-
-Flags:
-  --pages string
-        Directory containing page components (.tsx)
-        Auto-discovers: app/pages or pages
-  --out string
-        Output directory for bundles
-        Default: {pages_parent}/dist/alloy
-
-Examples:
-  alloy build
-  alloy build --pages app/pages --out app/dist
-  alloy dev
-  alloy dev --pages app/pages --out app/dist
-  alloy watch
-`)
+	usage := alloy.MustReadAsset("assets/usage.md")
+	fmt.Fprint(os.Stderr, usage)
 }
 
 func runBuild(args []string) {
@@ -210,26 +191,10 @@ func runDev(args []string) {
 			configPath = tmpConfig.Name()
 			defer os.Remove(configPath)
 
-			defaultConfig := `
-root = "."
-tmp_dir = ".alloy/tmp"
+			template := alloy.MustReadAsset("assets/air.toml")
 
-[build]
-cmd = "go build -o .alloy/tmp/server main.go"
-entrypoint = [".alloy/tmp/server"]
-include_ext = ["go", "json", "js", "css"]
-exclude_dir = ["node_modules", ".git", ".alloy"]
-
-[log]
-time = false
-main_only = true
-silent = true
-
-[proxy]
-enabled = true
-proxy_port = 3000
-app_port = 8080
-`
+			silent := os.Getenv("DEBUG") == ""
+			defaultConfig := fmt.Sprintf(template, silent)
 			if _, err := tmpConfig.WriteString(defaultConfig); err != nil {
 				return fmt.Errorf("🔴 write air config: %w", err)
 			}
@@ -242,7 +207,9 @@ app_port = 8080
 		cmd.Stdin = os.Stdin
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-		fmt.Fprintf(os.Stdout, "🔄 Starting live reload\n\n")
+		cmd.Env = append(os.Environ(), "ALLOY_DEV=1")
+
+		fmt.Fprintf(os.Stdout, "🔄 Starting live reload @ http://localhost:3000\n\n")
 		if err := cmd.Start(); err != nil {
 			return fmt.Errorf("🔴 start air: %w", err)
 		}

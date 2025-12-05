@@ -9,7 +9,7 @@ import (
 	"github.com/3-lines-studio/alloy/docs/loader"
 )
 
-//go:embed .alloy/dist/* public/*
+//go:embed dist/build/* public/*
 var dist embed.FS
 
 func main() {

@@ -43,8 +43,7 @@ var (
 const (
 	DefaultAppDir   = "app"
 	DefaultPagesDir = "app/pages"
-	DefaultDistDir  = ".alloy/dist"
-	AlloyBaseDir    = ".alloy"
+	DefaultDistDir  = "dist/build"
 
 	defaultRenderTimeout = 2 * time.Second
 	quickjsStackSize     = 4 * 1024 * 1024
@@ -149,22 +148,23 @@ func init() {
 }
 
 func loadEmbeddedAssets() {
-	polyfillsSource = mustReadAsset("assets/polyfills.js")
-	htmlTemplate = mustReadAsset("assets/html-template.html")
-	entryTemplate = mustReadAsset("assets/server-entry.tsx")
-	clientEntryTemplate = mustReadAsset("assets/client-entry.tsx")
-	renderTemplate = mustReadAsset("assets/render-invoke.js")
+	polyfillsSource = MustReadAsset("assets/polyfills.js")
+	htmlTemplate = MustReadAsset("assets/html-template.html")
+	entryTemplate = MustReadAsset("assets/server-entry.tsx")
+	clientEntryTemplate = MustReadAsset("assets/client-entry.tsx")
+	renderTemplate = MustReadAsset("assets/render-invoke.js")
 }
 
-func mustReadAsset(path string) string {
-	data, err := assetsFS.ReadFile(path)
-	if err != nil {
-		panic(fmt.Sprintf("failed to load %s: %v", path, err))
-	}
+func MustReadAsset(path string) string {
+	data, _ := assetsFS.ReadFile(path)
 	return string(data)
 }
 
 func Init(filesystem fs.FS, options ...func(*Config)) {
+	if os.Getenv("ALLOY_DEV") == "1" {
+		filesystem = os.DirFS(".")
+	}
+
 	cfg := &Config{
 		FS:            filesystem,
 		DefaultTitle:  "Alloy",

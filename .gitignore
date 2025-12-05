@@ -1,7 +1,4 @@
-.gocache/
-.alloy/
-.alloy-cache/
-.cache/
+dist/
 
 # Go build artifacts
 *.exe
